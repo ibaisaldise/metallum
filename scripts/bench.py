@@ -7,6 +7,8 @@
   scripts/bench.py ab [REF] [--label L] [--runs N]    # interleaved REF (default HEAD) vs working tree
   scripts/bench.py profile                            # one run under async-profiler + render-thread breakdown
   scripts/bench.py analyze FILE.collapsed [--thread NAME]
+  scripts/bench.py gpu-profile                        # one run under Xcode's Metal System Trace + GPU breakdown
+  scripts/bench.py gpu-analyze FILE.trace
 
 `run` launches `./gradlew runBenchmark` N times (a fixed-seed world, camera spin, then quit) and prints
 the median of the runs. The first time, it generates the world in a longer preparation run and keeps it
@@ -27,6 +29,7 @@ import statistics
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS = os.path.join(ROOT, "run", "metallum-bench")
@@ -373,12 +376,11 @@ def ab(args):
     compare(base_label, label)
 
 
-def profile(args):
-    """One run with async-profiler attached for exactly the recorded window, then a CPU breakdown."""
-    asprof = shutil.which("asprof")
-    if not asprof:
-        sys.exit("async-profiler not found; install it with `brew install async-profiler`")
-    label = args.label or f"profile-{current_commit()}"
+XCODE_DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer"
+
+
+def run_with_attached_tool(args, label, start_tool):
+    """Launch one benchmark run and call start_tool(pid) once recording starts; returns the tool's Popen."""
     env, template = setup(args)
     world = world_dir(ROOT)
     shutil.rmtree(world, ignore_errors=True)
@@ -386,34 +388,117 @@ def profile(args):
 
     os.makedirs(RESULTS, exist_ok=True)
     log_path = os.path.join(RESULTS, f"{label}.log")
-    out = os.path.join(RESULTS, f"{label}-{time.strftime('%Y%m%d-%H%M%S')}.collapsed")
     cmd = [os.path.join(ROOT, "gradlew"), "runBenchmark", "--console=plain", "-q",
            f"-Pbench.label={label}", f"-Pbench.duration={args.duration}", f"-Pbench.warmup={args.warmup}",
            f"-Pbench.renderDistance={args.render_distance}", f"-Pbench.width={args.width}", f"-Pbench.height={args.height}",
            f"-Pbench.present={str(args.present).lower()}"]
-    print(f"profiling '{label}' (~{args.warmup + args.duration + 25}s)...", flush=True)
     pattern = re.compile(r"\[metallum-bench\] recording for \d+s \(pid (\d+)\)")
-    profiler = None
+    tool = None
     with open(log_path, "w") as log:
         game = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
         while game.poll() is None:
-            if profiler is None:
+            if tool is None:
                 with open(log_path) as f:
                     match = pattern.search(f.read())
                 if match:
-                    # Stop early so the sample never includes shutdown (the log line can arrive late).
-                    profiler = subprocess.Popen(
-                        [asprof, "-d", str(max(1, args.duration - 3)), "-e", "cpu", "-i", "1ms", "-t",
-                         "-o", "collapsed", "-f", out, match.group(1)],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+                    tool = start_tool(match.group(1))
             time.sleep(0.2)
-    if profiler is None:
+    if tool is None:
         sys.exit(f"benchmark never started recording; see {log_path}")
-    profiler.wait()
-    if game.returncode != 0 or not os.path.isfile(out):
-        sys.exit(f"profiling failed (game exit {game.returncode}); see {log_path}")
+    tool.wait()
+    if game.returncode != 0:
+        sys.exit(f"benchmark run failed (game exit {game.returncode}); see {log_path}")
+    return tool
+
+
+def profile(args):
+    """One run with async-profiler attached for exactly the recorded window, then a CPU breakdown."""
+    asprof = shutil.which("asprof")
+    if not asprof:
+        sys.exit("async-profiler not found; install it with `brew install async-profiler`")
+    label = args.label or f"profile-{current_commit()}"
+    out = os.path.join(RESULTS, f"{label}-{time.strftime('%Y%m%d-%H%M%S')}.collapsed")
+    print(f"profiling '{label}' (~{args.warmup + args.duration + 25}s)...", flush=True)
+    # Stop early so the sample never includes shutdown (the log line can arrive late).
+    run_with_attached_tool(args, label, lambda pid: subprocess.Popen(
+        [asprof, "-d", str(max(1, args.duration - 3)), "-e", "cpu", "-i", "1ms", "-t", "-o", "collapsed", "-f", out, pid],
+        stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT))
+    if not os.path.isfile(out):
+        sys.exit("async-profiler wrote no profile")
     print(f"      -> {os.path.relpath(out, ROOT)}\n")
     analyze(out, args.thread, args.top)
+
+
+def gpu_profile(args):
+    """One run with Xcode's Metal System Trace attached during recording, then a GPU time breakdown."""
+    if not os.path.isdir(XCODE_DEVELOPER_DIR):
+        sys.exit(f"Xcode not found at {XCODE_DEVELOPER_DIR}")
+    label = args.label or f"gpu-{current_commit()}"
+    out = os.path.join(RESULTS, f"{label}-{time.strftime('%Y%m%d-%H%M%S')}.trace")
+    env = dict(os.environ, DEVELOPER_DIR=XCODE_DEVELOPER_DIR)
+    seconds = max(1, min(args.trace_seconds, args.duration - 3))
+    print(f"GPU-profiling '{label}' ({seconds}s trace; ~{args.warmup + args.duration + 40}s)...", flush=True)
+    log = open(os.path.join(RESULTS, f"{label}.xctrace.log"), "w")
+    run_with_attached_tool(args, label, lambda pid: subprocess.Popen(
+        ["xcrun", "xctrace", "record", "--template", "Metal System Trace", "--attach", pid,
+         "--time-limit", f"{seconds}s", "--output", out, "--no-prompt"],
+        env=env, stdout=log, stderr=subprocess.STDOUT))
+    if not os.path.isdir(out):
+        sys.exit(f"xctrace wrote no trace; see {log.name}")
+    print(f"      -> {os.path.relpath(out, ROOT)}\n")
+    gpu_analyze(out)
+
+
+def xctrace_rows(trace, schema):
+    """Rows of one table of an .trace bundle, as lists of (raw, formatted) per column (None for empty)."""
+    env = dict(os.environ, DEVELOPER_DIR=XCODE_DEVELOPER_DIR)
+    proc = subprocess.Popen(
+        ["xcrun", "xctrace", "export", "--input", trace,
+         "--xpath", f'/trace-toc/run[@number="1"]/data/table[@schema="{schema}"]'],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    values = {}
+
+    def value(el):
+        # Repeated values are written once with an id and referenced afterwards.
+        if el.get("ref") is not None:
+            return values.get(el.get("ref"), ("", ""))
+        for sub in el.iter():
+            if sub.get("id") is not None:
+                values[sub.get("id")] = (sub.text or "", sub.get("fmt", sub.text or ""))
+        return (el.text or "", el.get("fmt", el.text or ""))
+
+    for _, el in ET.iterparse(proc.stdout, events=("end",)):
+        if el.tag == "row":
+            yield [None if c.tag == "sentinel" else value(c) for c in el]
+            el.clear()
+    proc.wait()
+
+
+def gpu_analyze(trace, process="java"):
+    """GPU busy time per process, and per channel (vertex/fragment/compute/blit) for the game."""
+    by_process, by_channel, encoders = {}, {}, set()
+    start, end = None, None
+    for row in xctrace_rows(trace, "metal-gpu-intervals"):
+        begin, duration = int(row[0][0]), int(row[1][0])
+        start = begin if start is None else min(start, begin)
+        end = begin + duration if end is None else max(end, begin + duration)
+        name = (row[10][1] if len(row) > 10 and row[10] else "?").split(" (")[0] or "?"
+        by_process[name] = by_process.get(name, 0) + duration
+        if name == process:
+            channel = row[2][1] if row[2] else "?"
+            by_channel[channel] = by_channel.get(channel, 0) + duration
+            if len(row) > 16 and row[16]:
+                encoders.add(row[16][0])
+    if start is None:
+        sys.exit("no GPU intervals in trace")
+    window = end - start
+    print(f"GPU intervals over {window / 1e9:.2f}s (channels overlap: vertex and fragment run concurrently)")
+    print("\n  busy time by process:")
+    for name, total in sorted(by_process.items(), key=lambda kv: -kv[1])[:6]:
+        print(f"    {100 * total / window:6.1f}%  {name}")
+    print(f"\n  {process} by channel ({len(encoders)} encoders):")
+    for name, total in sorted(by_channel.items(), key=lambda kv: -kv[1]):
+        print(f"    {100 * total / window:6.1f}%  {name}")
 
 
 def clean_frame(frame):
@@ -518,6 +603,13 @@ def main():
     p_profile.add_argument("--thread", default="auto")
     p_profile.add_argument("--top", type=int, default=25)
 
+    p_gpu = sub.add_parser("gpu-profile", parents=[run_options],
+                           help="one run under Xcode's Metal System Trace, then a GPU time breakdown")
+    p_gpu.add_argument("--trace-seconds", type=int, default=3, help="length of the trace (traces are ~50 MB/s)")
+
+    p_gpu_analyze = sub.add_parser("gpu-analyze", help="GPU time breakdown of a .trace from gpu-profile")
+    p_gpu_analyze.add_argument("file")
+
     p_analyze = sub.add_parser("analyze", help="CPU breakdown of a .collapsed file from a profiled run")
     p_analyze.add_argument("file")
     p_analyze.add_argument("--thread", default="auto")
@@ -538,6 +630,10 @@ def main():
         ab(args)
     elif args.command == "profile":
         profile(args)
+    elif args.command == "gpu-profile":
+        gpu_profile(args)
+    elif args.command == "gpu-analyze":
+        gpu_analyze(args.file)
     elif args.command == "analyze":
         analyze(args.file, args.thread, args.top, args.match)
     elif args.command == "show":
