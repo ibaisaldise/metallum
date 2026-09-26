@@ -217,6 +217,7 @@ final class MetalRenderPass implements RenderPassBackend {
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
 
+        commandEncoder.markRead(nativeIndexBuffer);
         MTLBuffer indexBufferHandle = nativeIndexBuffer.metalBuffer();
         MemorySegment offsets = MemorySegment.ofAddress(org.lwjgl.system.MemoryUtil.memAddress(firstIndexOffsets)).reinterpret(drawCount * 8L);
         MemorySegment counts = MemorySegment.ofAddress(org.lwjgl.system.MemoryUtil.memAddress(indexCounts)).reinterpret(drawCount * 4L);
@@ -243,6 +244,8 @@ final class MetalRenderPass implements RenderPassBackend {
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
 
+        commandEncoder.markRead(nativeIndexBuffer);
+        commandEncoder.markRead((MetalGpuBuffer) commands.buffer());
         MTLBuffer indexBufferHandle = nativeIndexBuffer.metalBuffer();
         MTLBuffer indirectBuffer = ((MetalGpuBuffer) commands.buffer()).metalBuffer();
         long indirectOffset = commands.offset();
@@ -316,6 +319,7 @@ final class MetalRenderPass implements RenderPassBackend {
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
 
+        commandEncoder.markRead((MetalGpuBuffer) commands.buffer());
         MTLBuffer indirectBuffer = ((MetalGpuBuffer) commands.buffer()).metalBuffer();
         long indirectOffset = commands.offset();
         for (int i = 0; i < drawCount; i++) {
@@ -394,6 +398,7 @@ final class MetalRenderPass implements RenderPassBackend {
             }
 
             MetalGpuBuffer nativeVertexBuffer = (MetalGpuBuffer) vertexBuffer.buffer();
+            commandEncoder.markRead(nativeVertexBuffer);
             int metalSlot = firstSlot + slot;
             enc.setVertexBuffer(nativeVertexBuffer.metalBuffer(), vertexBuffer.offset(), metalSlot);
         }
@@ -419,6 +424,7 @@ final class MetalRenderPass implements RenderPassBackend {
             final int baseInstance
     ) {
         MTLPrimitiveType primitiveType = primitiveTopology();
+        commandEncoder.markRead(nativeIndexBuffer);
 
         long indexOffsetBytes = (long) firstIndex * indexType.bytes;
         if (primitiveType == MTLPrimitiveType.TriangleFan) {
@@ -608,6 +614,7 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         MetalGpuBuffer uniformBuffer = (MetalGpuBuffer) uniformSlice.buffer();
+        commandEncoder.markRead(uniformBuffer);
         bindBuffer(enc, uniformBuffer.metalBuffer(), uniformSlice.offset(), binding.bindingIndex(), binding.stageMask());
     }
 
@@ -626,6 +633,7 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         MetalGpuBuffer texelBuffer = (MetalGpuBuffer) texelSlice.buffer();
+        commandEncoder.markRead(texelBuffer);
         long pixelFormat = MTLPixelFormat.from(texelFormat).value;
         int pixelSize = texelFormat.blockSize();
         long texelByteLength = texelSlice.length();

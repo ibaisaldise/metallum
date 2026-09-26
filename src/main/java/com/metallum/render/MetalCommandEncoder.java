@@ -45,6 +45,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MTLCommandBuffer commandBuffer;
     @Nullable
     private MTLCommandEncoder currentEncoder;
+    // Copies that can run before everything else in the frame go here instead of splitting the main
+    // command buffer's render encoders. Committed just ahead of the main command buffer.
+    @Nullable
+    private MTLCommandBuffer uploadCommandBuffer;
+    @Nullable
+    private MTLBlitCommandEncoder uploadEncoder;
     private MemorySegment renderColorAttachment = MemorySegment.NULL;
     private MemorySegment renderDepthAttachment = MemorySegment.NULL;
     private final Long2ObjectOpenHashMap<ArrayDeque<MTLBuffer>> dynamicBackingPool = new Long2ObjectOpenHashMap<>();
@@ -105,9 +111,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     @Override
     public void submit() {
         InFlight toClose = null;
+        if (uploadEncoder != null) {
+            // Uploads are only tracked for completion through the main command buffer, so always have one.
+            commandBuffer();
+        }
         if (commandBuffer != null) {
             submitRenderPass();
             endEncoder();
+            commitUploads();
 
             int slot = (int) (currentSubmitIndex % MAX_SUBMITS_IN_FLIGHT);
             submitSemaphores[slot].drainPermits();
@@ -136,6 +147,62 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
         transientMemory.rotate();
         destroyQueue.rotate();
+    }
+
+    /** The frame's upload blit encoder; its work runs before the main command buffer. */
+    private MTLBlitCommandEncoder uploadEncoder() {
+        if (uploadEncoder == null) {
+            uploadCommandBuffer = device.commandQueue.makeCommandBuffer(
+                    device.useLabels() ? "Metallum uploads " + currentSubmitIndex : null
+            );
+            uploadEncoder = uploadCommandBuffer.makeBlitCommandEncoder();
+            uploadEncoder.waitForFence(fence);
+        }
+        return uploadEncoder;
+    }
+
+    private void commitUploads() {
+        if (uploadEncoder == null || uploadCommandBuffer == null) {
+            return;
+        }
+        uploadEncoder.updateFence(fence);
+        uploadEncoder.endEncoding();
+        uploadEncoder = null;
+        // The queue retains committed command buffers, so it can be released right away.
+        uploadCommandBuffer.commit();
+        uploadCommandBuffer.close();
+        uploadCommandBuffer = null;
+    }
+
+    /**
+     * Whether copying {@code source} into {@code destination} may run in the upload command buffer, i.e.
+     * before every command already encoded this frame. That holds when nothing in the main command buffer
+     * has touched the destination yet, the source wasn't written by the GPU this frame, and the upload
+     * encoder has no conflicting access (it has no barriers between its commands).
+     */
+    private boolean canHoistCopy(final MetalGpuBuffer source, final MetalGpuBuffer destination) {
+        long submit = currentSubmitIndex;
+        return !destination.isDynamic()
+                && destination.gpuUseSubmit != submit
+                && destination.uploadUseSubmit != submit
+                && source.gpuWriteSubmit != submit
+                && source.uploadWriteSubmit != submit;
+    }
+
+    private void hoistCopy(final MetalGpuBuffer source, final long sourceOffset, final MetalGpuBuffer destination, final long destinationOffset, final long length) {
+        uploadEncoder().copyFromBufferToBuffer(source.metalBuffer(), sourceOffset, destination.metalBuffer(), destinationOffset, length);
+        source.uploadUseSubmit = currentSubmitIndex;
+        destination.uploadUseSubmit = currentSubmitIndex;
+        destination.uploadWriteSubmit = currentSubmitIndex;
+    }
+
+    void markRead(final MetalGpuBuffer buffer) {
+        buffer.gpuUseSubmit = currentSubmitIndex;
+    }
+
+    void markWrite(final MetalGpuBuffer buffer) {
+        buffer.gpuUseSubmit = currentSubmitIndex;
+        buffer.gpuWriteSubmit = currentSubmitIndex;
     }
 
     MTLRenderCommandEncoder renderCommandEncoder(
@@ -325,6 +392,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         GpuBufferSlice staging = transientMemory.uploadStaging(data, 4L, GpuBuffer.USAGE_COPY_SRC);
         MetalGpuBuffer stagingBuffer = (MetalGpuBuffer) staging.buffer();
 
+        if (canHoistCopy(stagingBuffer, buffer)) {
+            hoistCopy(stagingBuffer, staging.offset(), buffer, destination.offset(), length);
+            return;
+        }
+        markWrite(buffer);
         MTLBlitCommandEncoder blit = blitCommandEncoder();
         blit.copyFromBufferToBuffer(
                 stagingBuffer.metalBuffer(),
@@ -395,6 +467,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     public void copyToBuffer(final GpuBufferSlice source, final GpuBufferSlice target) {
         MetalGpuBuffer sourceBuffer = (MetalGpuBuffer) source.buffer();
         MetalGpuBuffer targetBuffer = (MetalGpuBuffer) target.buffer();
+        if (canHoistCopy(sourceBuffer, targetBuffer)) {
+            hoistCopy(sourceBuffer, source.offset(), targetBuffer, target.offset(), source.length());
+            return;
+        }
+        markRead(sourceBuffer);
+        markWrite(targetBuffer);
         MTLBlitCommandEncoder blit = blitCommandEncoder();
         blit.copyFromBufferToBuffer(
                 sourceBuffer.metalBuffer(),
@@ -461,6 +539,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         MetalGpuTexture metalDst = (MetalGpuTexture) destination;
         flushPendingClearForWrite(metalDst);
 
+        markRead((MetalGpuBuffer) source.buffer());
         int texelSize = destination.getFormat().blockSize();
         long skipBytes = (sourceX + (long) sourceY * sourceWidth) * texelSize;
         long rowBytes = (long) sourceWidth * texelSize;
@@ -502,6 +581,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         MetalGpuTexture texture = (MetalGpuTexture) source;
         flushPendingClear(texture);
         MetalGpuBuffer buffer = (MetalGpuBuffer) destination;
+        markWrite(buffer);
         int bytesPerPixel = texture.pixelSize();
         int rowBytes = width * bytesPerPixel;
         int bytesPerImage = rowBytes * height;
@@ -595,6 +675,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     void close() {
         submitRenderPass();
         endEncoder();
+        if (uploadEncoder != null) {
+            uploadEncoder.endEncoding();
+            uploadEncoder = null;
+        }
+        if (uploadCommandBuffer != null) {
+            uploadCommandBuffer.close();
+            uploadCommandBuffer = null;
+        }
         for (int slot = 0; slot < inFlight.length; slot++) {
             InFlight f = inFlight[slot];
             if (f != null) {
@@ -622,7 +710,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     void waitForSubmittedGpuWork() {
-        if (commandBuffer != null || currentRenderPass != null || currentEncoder != null) {
+        if (commandBuffer != null || uploadEncoder != null || currentRenderPass != null || currentEncoder != null) {
             submit();
         } else {
             endEncoder();

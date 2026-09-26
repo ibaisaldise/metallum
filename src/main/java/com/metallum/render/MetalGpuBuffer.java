@@ -29,6 +29,12 @@ class MetalGpuBuffer extends GpuBuffer {
     @Nullable
     private ByteBuffer storage;
     private boolean closed;
+    // Submit indices of the last GPU access, for MetalCommandEncoder's upload hoisting: in the frame's
+    // main command buffer (read or write / write), and in its upload command buffer (read or write / write).
+    long gpuUseSubmit = -1L;
+    long gpuWriteSubmit = -1L;
+    long uploadUseSubmit = -1L;
+    long uploadWriteSubmit = -1L;
     // Single-entry cache: texel buffers are rebound every frame with the same range.
     private MemorySegment texelView = MemorySegment.NULL;
     private long texelViewFormat;
