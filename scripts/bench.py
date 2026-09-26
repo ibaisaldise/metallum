@@ -4,11 +4,16 @@
   scripts/bench.py run  [--label L] [--runs N] [--duration S] [--warmup S] [--render-distance N]
   scripts/bench.py show [LABEL|FILE ...]
   scripts/bench.py compare BASELINE CANDIDATE
+  scripts/bench.py ab [REF] [--label L] [--runs N]    # interleaved REF (default HEAD) vs working tree
 
 `run` launches `./gradlew runBenchmark` N times (a fixed-seed world, camera spin, then quit) and prints
 the median of the runs. The first time, it generates the world in a longer preparation run and keeps it
 as a template (run/metallum-bench/templates/); each measured run starts from a fresh copy of it. Labels default to the current git commit. BASELINE/CANDIDATE are labels (all
 run/metallum-bench/<label>-*.json files, medianed) or paths to individual result files.
+
+Machine speed drifts by several percent over an hour (thermals, background load), so results recorded at
+different times are not comparable to within a few percent. For judging a change, prefer `ab`: it builds
+REF in a git worktree and alternates baseline/candidate runs so both sides see the same conditions.
 """
 import argparse
 import glob
@@ -179,25 +184,30 @@ def count_chunks(world):
     return total
 
 
-def launch(env, label, args, warmup, duration):
-    """One game launch. Returns the result file path, or exits on failure."""
-    cmd = [os.path.join(ROOT, "gradlew"), "runBenchmark", "--console=plain", "-q",
+def launch(env, label, args, warmup, duration, project=ROOT):
+    """One game launch of the checkout in `project`. Returns the result path (in RESULTS), or exits on failure."""
+    cmd = [os.path.join(project, "gradlew"), "runBenchmark", "--console=plain", "-q",
            f"-Pbench.label={label}", f"-Pbench.duration={duration}", f"-Pbench.warmup={warmup}",
            f"-Pbench.renderDistance={args.render_distance}", f"-Pbench.width={args.width}", f"-Pbench.height={args.height}"]
     os.makedirs(RESULTS, exist_ok=True)
     log_path = os.path.join(RESULTS, f"{label}.log")
+    project_results = os.path.join(project, "run", "metallum-bench")
     started = time.time()
     with open(log_path, "w") as log:
-        code = subprocess.call(cmd, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
-    new = [p for p in glob.glob(os.path.join(RESULTS, f"{label}-[0-9]*-[0-9]*.json")) if os.path.getmtime(p) >= started]
+        code = subprocess.call(cmd, cwd=project, env=env, stdout=log, stderr=subprocess.STDOUT)
+    new = [p for p in glob.glob(os.path.join(project_results, f"{label}-[0-9]*-[0-9]*.json")) if os.path.getmtime(p) >= started]
     if code != 0 or not new:
         sys.exit(f"benchmark run failed (exit {code}); see {log_path}")
-    return max(new, key=os.path.getmtime)
+    result = max(new, key=os.path.getmtime)
+    if project != ROOT:
+        moved = os.path.join(RESULTS, os.path.basename(result))
+        shutil.move(result, moved)
+        result = moved
+    return result
 
 
-def restore_world(template):
-    shutil.rmtree(WORLD, ignore_errors=True)
-    shutil.copytree(template, WORLD)
+def world_dir(project):
+    return os.path.join(project, "run", "saves", "metallum-bench")
 
 
 def prepare_template(env, args, template):
@@ -210,49 +220,104 @@ def prepare_template(env, args, template):
     print(f"      -> {os.path.relpath(template, ROOT)} ({count_chunks(template)} chunks)")
 
 
-def run(args):
-    label = args.label or current_commit()
+def setup(args):
+    """Java environment plus the pre-generated world template for this render distance."""
     env = dict(os.environ)
     home = java_home()
     if home:
         env["JAVA_HOME"] = home
-
     # Every measured run starts from an identical copy of a fully generated world, so no run pays for
     # terrain generation and none inherits state (time, entities, player) saved by the previous one.
     template = os.path.join(TEMPLATES, f"world-rd{args.render_distance}")
     if args.regenerate or not os.path.isdir(template):
         prepare_template(env, args, template)
-    template_chunks = count_chunks(template)
+    return env, template
 
+
+def measure(env, args, template, label, project=ROOT):
+    world = world_dir(project)
+    shutil.rmtree(world, ignore_errors=True)
+    shutil.copytree(template, world)
+    result = launch(env, label, args, args.warmup, args.duration, project)
+    print(f"      -> {os.path.relpath(result, ROOT)}", flush=True)
+    generated = count_chunks(world) - count_chunks(template)
+    if generated > 0:
+        print(f"      WARNING: {generated} new chunks were generated during this run; "
+              f"regenerate the template with --regenerate", file=sys.stderr)
+
+
+def run(args):
+    label = args.label or current_commit()
+    env, template = setup(args)
     for i in range(args.runs):
         print(f"[{i + 1}/{args.runs}] running benchmark '{label}' (~{args.warmup + args.duration + 25}s)...", flush=True)
-        restore_world(template)
-        result = launch(env, label, args, args.warmup, args.duration)
-        print(f"      -> {os.path.relpath(result, ROOT)}")
-        generated = count_chunks(WORLD) - template_chunks
-        if generated > 0:
-            print(f"      WARNING: {generated} new chunks were generated during this run; "
-                  f"regenerate the template with --regenerate", file=sys.stderr)
+        measure(env, args, template, label)
         if i + 1 < args.runs and args.cooldown:
             time.sleep(args.cooldown)
     print()
     show([label])
 
 
+def baseline_worktree(ref):
+    """A detached git worktree of `ref` (kept under run/, so its Gradle caches survive between A/B runs)."""
+    path = os.path.join(RESULTS, "baseline-worktree")
+    try:
+        commit = subprocess.check_output(["git", "rev-parse", "--short", f"{ref}^{{commit}}"], cwd=ROOT, text=True).strip()
+    except subprocess.CalledProcessError:
+        sys.exit(f"unknown git ref '{ref}'")
+    if not os.path.isdir(path):
+        subprocess.check_call(["git", "worktree", "add", "--quiet", "--detach", path, commit], cwd=ROOT)
+    else:
+        subprocess.check_call(["git", "checkout", "--quiet", "--force", "--detach", commit], cwd=path)
+    if not os.path.isfile(os.path.join(path, "src", "main", "java", "com", "metallum", "bench", "Benchmark.java")):
+        sys.exit(f"{ref} ({commit}) predates the benchmark harness and can't be measured")
+    return path, commit
+
+
+def ab(args):
+    """Interleave baseline and candidate runs (ABBA...) so both see the same thermal and background conditions."""
+    label = args.label or current_commit()
+    base_label = f"{label}-base"
+    env, template = setup(args)
+    base_path, base_commit = baseline_worktree(args.baseline)
+    print(f"A/B: baseline {args.baseline} ({base_commit}) vs working tree, {args.runs} run(s) each", flush=True)
+    for label_glob in (label, base_label):
+        for old in glob.glob(os.path.join(RESULTS, f"{label_glob}-[0-9]*-[0-9]*.json")):
+            os.remove(old)
+    sides = [("baseline", base_label, base_path), ("candidate", label, ROOT)]
+    total = 2 * args.runs
+    step = 0
+    for i in range(args.runs):
+        for name, side_label, project in (sides if i % 2 == 0 else sides[::-1]):
+            step += 1
+            print(f"[{step}/{total}] {name} (~{args.warmup + args.duration + 25}s)...", flush=True)
+            measure(env, args, template, side_label, project)
+            if step < total and args.cooldown:
+                time.sleep(args.cooldown)
+    print()
+    compare(base_label, label)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_run = sub.add_parser("run", help="run the benchmark N times")
-    p_run.add_argument("--label", help="result label (default: current git commit)")
-    p_run.add_argument("--runs", type=int, default=3)
-    p_run.add_argument("--duration", type=int, default=30, help="recorded seconds (one camera revolution)")
-    p_run.add_argument("--warmup", type=int, default=20, help="seconds of warmup before recording")
-    p_run.add_argument("--render-distance", type=int, default=16)
-    p_run.add_argument("--width", type=int, default=1600)
-    p_run.add_argument("--height", type=int, default=900)
-    p_run.add_argument("--cooldown", type=int, default=5, help="seconds to idle between runs")
-    p_run.add_argument("--regenerate", action="store_true", help="rebuild the pre-generated world template first")
+    run_options = argparse.ArgumentParser(add_help=False)
+    run_options.add_argument("--label", help="result label (default: current git commit)")
+    run_options.add_argument("--runs", type=int, default=3)
+    run_options.add_argument("--duration", type=int, default=30, help="recorded seconds (one camera revolution)")
+    run_options.add_argument("--warmup", type=int, default=20, help="seconds of warmup before recording")
+    run_options.add_argument("--render-distance", type=int, default=16)
+    run_options.add_argument("--width", type=int, default=1600)
+    run_options.add_argument("--height", type=int, default=900)
+    run_options.add_argument("--cooldown", type=int, default=5, help="seconds to idle between runs")
+    run_options.add_argument("--regenerate", action="store_true", help="rebuild the pre-generated world template first")
+
+    sub.add_parser("run", parents=[run_options], help="run the benchmark N times")
+
+    p_ab = sub.add_parser("ab", parents=[run_options],
+                          help="interleaved runs of a baseline git ref vs the working tree, then compare")
+    p_ab.add_argument("baseline", nargs="?", default="HEAD", help="git ref to compare against (default: HEAD)")
 
     p_show = sub.add_parser("show", help="summarise results")
     p_show.add_argument("specs", nargs="*", help="labels or result files (default: all labels)")
@@ -264,6 +329,8 @@ def main():
     args = parser.parse_args()
     if args.command == "run":
         run(args)
+    elif args.command == "ab":
+        ab(args)
     elif args.command == "show":
         specs = args.specs or sorted({os.path.basename(p).rsplit("-", 2)[0] for p in glob.glob(os.path.join(RESULTS, "*.json"))})
         show(specs)
