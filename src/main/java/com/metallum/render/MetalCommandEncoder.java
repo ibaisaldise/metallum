@@ -21,6 +21,7 @@ import org.jspecify.annotations.Nullable;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.IntBuffer;
 import java.util.*;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -47,6 +48,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MemorySegment renderColorAttachment = MemorySegment.NULL;
     private MemorySegment renderDepthAttachment = MemorySegment.NULL;
     private final Long2ObjectOpenHashMap<ArrayDeque<MTLBuffer>> dynamicBackingPool = new Long2ObjectOpenHashMap<>();
+    @Nullable
+    private MTLBuffer fanIndices;
+    private int fanTriangleCapacity;
 
     MetalCommandEncoder(final MetalDevice device) {
         this.device = device;
@@ -364,6 +368,29 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         queueForDestroy(() -> dynamicBackingPool.computeIfAbsent(size, _ -> new ArrayDeque<>()).push(buffer));
     }
 
+    /**
+     * Shared UInt32 index buffer for non-indexed triangle fans: triangle {@code i} is {@code (0, i+1, i+2)},
+     * drawn with {@code baseVertex = firstVertex}. Grows by powers of two; never rewritten in place.
+     */
+    MTLBuffer fanIndexBuffer(final int triangleCount) {
+        if (fanIndices != null && fanTriangleCapacity >= triangleCount) {
+            return fanIndices;
+        }
+        int capacity = Math.max(256, Integer.highestOneBit(Math.max(1, triangleCount - 1)) << 1);
+        long size = (long) capacity * 3L * Integer.BYTES;
+        MTLBuffer buffer = device.metalDevice().newBuffer(size, MTLResourceOptions.of(MTLStorageMode.Shared, MTLHazardTrackingMode.Untracked));
+        IntBuffer indices = ObjC.byteBufferView(buffer.contents(), size).order(ByteOrder.nativeOrder()).asIntBuffer();
+        for (int i = 0; i < capacity; i++) {
+            indices.put(0).put(i + 1).put(i + 2);
+        }
+        if (fanIndices != null) {
+            device.queueResourceRelease(fanIndices.handle());
+        }
+        fanIndices = buffer;
+        fanTriangleCapacity = capacity;
+        return buffer;
+    }
+
     @Override
     public void copyToBuffer(final GpuBufferSlice source, final GpuBufferSlice target) {
         MetalGpuBuffer sourceBuffer = (MetalGpuBuffer) source.buffer();
@@ -580,6 +607,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             commandBuffer = null;
         }
         transientMemory.close();
+        if (fanIndices != null) {
+            device.queueResourceRelease(fanIndices.handle());
+            fanIndices = null;
+        }
         device.queueResourceRelease(fence.handle());
         destroyQueue.close();
         for (ArrayDeque<MTLBuffer> bucket : dynamicBackingPool.values()) {

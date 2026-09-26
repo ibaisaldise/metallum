@@ -10,6 +10,7 @@ import com.mojang.blaze3d.buffers.GpuBufferSlice.MappedView;
 import com.mojang.blaze3d.systems.TransientMemory;
 import com.mojang.blaze3d.util.TransientBlockAllocator;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.ints.IntComparator;
 import it.unimi.dsi.fastutil.objects.ReferenceArrayList;
 import net.fabricmc.api.EnvType;
@@ -20,6 +21,7 @@ import org.lwjgl.system.MemoryUtil;
 
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.stream.IntStream;
 
@@ -36,6 +38,12 @@ final class MetalTransientMemory implements TransientMemory {
             BLOCK_SIZE, MAX_CPU_ALIGNMENT, TransientBlockAllocator.Allocator.create(MemoryUtil::nmemAlloc, MemoryUtil::nmemFree)
     );
     private final TransientBlockAllocator<MetalGpuBuffer> gpuBlockAllocator;
+    // Freed blocks, by size. Blocks bigger than BLOCK_SIZE are allocated one-off by the allocator and
+    // freed every frame; recycling them (rounded up to a power of two) avoids a new MTLBuffer per frame.
+    // Blocks only get here via the destruction queue, so the GPU is done with them.
+    private static final int MAX_POOLED_BLOCKS_PER_SIZE = 4;
+    private final Long2ObjectOpenHashMap<ArrayDeque<MetalGpuBuffer>> blockPool = new Long2ObjectOpenHashMap<>();
+    private boolean closing;
     private long submitIndex = 0L;
 
     MetalTransientMemory(final MetalDevice device, final MetalCommandEncoder encoder) {
@@ -53,15 +61,32 @@ final class MetalTransientMemory implements TransientMemory {
     }
 
     void close() {
+        closing = true;
         cpuBlockAllocator.close();
         gpuBlockAllocator.close();
+        for (ArrayDeque<MetalGpuBuffer> bucket : blockPool.values()) {
+            bucket.forEach(MetalGpuBuffer::close);
+        }
+        blockPool.clear();
     }
 
     private MetalGpuBuffer allocateGpuBlock(final long size) {
-        return new MetalGpuBuffer(device, BLOCK_USAGE, size);
+        long pooledSize = size <= BLOCK_SIZE ? size : Long.highestOneBit(size - 1L) << 1;
+        ArrayDeque<MetalGpuBuffer> bucket = blockPool.get(pooledSize);
+        if (bucket != null && !bucket.isEmpty()) {
+            return bucket.pop();
+        }
+        return new MetalGpuBuffer(device, BLOCK_USAGE, pooledSize);
     }
 
     private void freeGpuBlock(final MetalGpuBuffer block) {
+        if (!closing) {
+            ArrayDeque<MetalGpuBuffer> bucket = blockPool.computeIfAbsent(block.size(), _ -> new ArrayDeque<>());
+            if (bucket.size() < MAX_POOLED_BLOCKS_PER_SIZE) {
+                bucket.push(block);
+                return;
+            }
+        }
         block.close();
     }
 

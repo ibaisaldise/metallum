@@ -401,28 +401,11 @@ final class MetalRenderPass implements RenderPassBackend {
 
     private void drawTriangleFan(MTLRenderCommandEncoder encoder, final int firstVertex, final int vertexCount, final int instanceCount, final int baseInstance) {
         int triangleCount = vertexCount - 2;
-        int indexCount = triangleCount * 3;
-        MTLIndexType fanIndexType = vertexCount - 1 <= 0xFFFF ? MTLIndexType.UInt16 : MTLIndexType.UInt32;
-
-        try (GpuBufferSlice.MappedView mapped = commandEncoder.transientMemory().allocateGpuMapped((long) indexCount * fanIndexType.bytes, fanIndexType.bytes, GpuBuffer.USAGE_INDEX)) {
-            if (fanIndexType == MTLIndexType.UInt16) {
-                ShortBuffer indices = mapped.data().asShortBuffer();
-                for (int i = 0; i < triangleCount; i++) {
-                    indices.put((short) 0);
-                    indices.put((short) (i + 1));
-                    indices.put((short) (i + 2));
-                }
-            } else {
-                IntBuffer indices = mapped.data().asIntBuffer();
-                for (int i = 0; i < triangleCount; i++) {
-                    indices.put(0);
-                    indices.put(i + 1);
-                    indices.put(i + 2);
-                }
-            }
-            GpuBufferSlice slice = mapped.slice();
-            encoder.drawIndexedPrimitives(MTLPrimitiveType.Triangle, indexCount, fanIndexType, ((MetalGpuBuffer) slice.buffer()).metalBuffer(), slice.offset(), instanceCount, firstVertex, baseInstance);
+        if (triangleCount <= 0) {
+            return;
         }
+        MTLBuffer fanIndices = commandEncoder.fanIndexBuffer(triangleCount);
+        encoder.drawIndexedPrimitives(MTLPrimitiveType.Triangle, triangleCount * 3, MTLIndexType.UInt32, fanIndices, 0L, instanceCount, firstVertex, baseInstance);
     }
 
     private void drawIndexedNative(
