@@ -35,7 +35,8 @@ loom {
 					"-Dmetallum.bench.duration=${findProperty('bench.duration') ?: 30}",
 					"-Dmetallum.bench.warmup=${findProperty('bench.warmup') ?: 20}",
 					"-Dmetallum.bench.renderDistance=${findProperty('bench.renderDistance') ?: 16}",
-					"-Dmetallum.bench.present=${findProperty('bench.present') ?: false}"
+					"-Dmetallum.bench.present=${findProperty('bench.present') ?: false}",
+					*(findProperty('bench.dumpMsl') ? ["-Dmetallum.dumpMsl=${findProperty('bench.dumpMsl')}"] : [])
 			)
 		}
 	}

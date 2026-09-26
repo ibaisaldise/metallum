@@ -36,7 +36,25 @@ final class MetalCrossShaderCompiler {
     private static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
     private static final Pattern FRAGMENT_ENTRY_PATTERN = Pattern.compile("\\bfragment\\s+\\w+\\s+(\\w+)\\s*\\(");
 
+    /** Set -Dmetallum.dumpMsl=<dir> to write every pipeline's generated MSL there, for inspection. */
+    private static final String DUMP_MSL_DIR = System.getProperty("metallum.dumpMsl");
+
     private MetalCrossShaderCompiler() {
+    }
+
+    private static void dumpMsl(final RenderPipeline pipeline, final String vertexMsl, final String fragmentMsl) {
+        if (DUMP_MSL_DIR == null) {
+            return;
+        }
+        String name = pipeline.getLocation().toString().replaceAll("[^A-Za-z0-9._-]", "_");
+        try {
+            java.nio.file.Path dir = java.nio.file.Path.of(DUMP_MSL_DIR);
+            java.nio.file.Files.createDirectories(dir);
+            java.nio.file.Files.writeString(dir.resolve(name + ".vert.metal"), vertexMsl);
+            java.nio.file.Files.writeString(dir.resolve(name + ".frag.metal"), fragmentMsl);
+        } catch (java.io.IOException e) {
+            com.metallum.Metallum.LOGGER.warn("[metallum] failed to dump MSL for {}", pipeline.getLocation(), e);
+        }
     }
 
     static MetalCompiledRenderPipeline compile(final MetalDevice device, final RenderPipeline pipeline, final ShaderSource shaderSource) {
@@ -65,6 +83,7 @@ final class MetalCrossShaderCompiler {
             String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
             String fragmentEntryPoint = extractEntryPoint(fragmentMsl.source(), FRAGMENT_ENTRY_PATTERN, "main0");
             List<MetalCompiledRenderPipeline.ResourceBinding> resources = buildResourceBindings(layoutEntries, vertexMsl, fragmentMsl);
+            dumpMsl(pipeline, vertexMsl.source(), fragmentMsl.source());
             return new MetalCompiledRenderPipeline(
                     device,
                     pipeline,
