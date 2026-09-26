@@ -1,5 +1,6 @@
 package com.metallum.render;
 
+import com.metallum.bench.Benchmark;
 import com.metallum.mtl.CAMetalLayer;
 import com.mojang.blaze3d.systems.CommandEncoderBackend;
 import com.mojang.blaze3d.systems.GpuSurface;
@@ -57,7 +58,9 @@ final class MetalSurface implements GpuSurfaceBackend {
             throw new IllegalArgumentException("Metal surface requires MetalCommandEncoder");
         }
 
-        metalEncoder.presentTextureToDrawable(metalLayer, textureView);
+        if (!Benchmark.OFFSCREEN) {
+            metalEncoder.presentTextureToDrawable(metalLayer, textureView);
+        }
         this.pendingPresentEncoder = metalEncoder;
     }
 

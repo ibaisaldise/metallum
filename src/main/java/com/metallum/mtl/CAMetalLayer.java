@@ -1,5 +1,6 @@
 package com.metallum.mtl;
 
+import com.metallum.bench.Counters;
 import com.metallum.objc.Msg;
 import com.metallum.objc.ObjC;
 import net.fabricmc.api.EnvType;
@@ -52,7 +53,9 @@ public final class CAMetalLayer {
 
     @Nullable
     CAMetalDrawable nextDrawable() {
+        long start = System.nanoTime();
         MemorySegment drawable = NEXT_DRAWABLE.sendPtr(this.handle);
+        Counters.drawableWaitNanos += System.nanoTime() - start;
         return ObjC.isNil(drawable) ? null : new CAMetalDrawable(drawable);
     }
 }

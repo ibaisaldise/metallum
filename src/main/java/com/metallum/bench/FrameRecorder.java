@@ -30,6 +30,7 @@ final class FrameRecorder {
     private long gpuNanosAtStart;
     private long gpuSamplesAtStart;
     private long submitWaitAtStart;
+    private long drawableWaitAtStart;
 
     void start(final long now) {
         startedAt = now;
@@ -38,6 +39,7 @@ final class FrameRecorder {
         gpuNanosAtStart = Counters.gpuNanos;
         gpuSamplesAtStart = Counters.gpuSamples;
         submitWaitAtStart = Counters.submitWaitNanos;
+        drawableWaitAtStart = Counters.drawableWaitNanos;
     }
 
     void frame(final long now) {
@@ -108,12 +110,14 @@ final class FrameRecorder {
         long gpuSamples = Counters.gpuSamples - gpuSamplesAtStart;
         long gpuNanos = Counters.gpuNanos - gpuNanosAtStart;
         long submitWait = Counters.submitWaitNanos - submitWaitAtStart;
+        long drawableWait = Counters.drawableWaitNanos - drawableWaitAtStart;
         if (gpuSamples > 0) {
             // Only the Metal backend feeds these.
             summary.addProperty("gpuMsPerSubmit", round(gpuNanos / 1.0e6 / gpuSamples, 3));
             summary.addProperty("gpuBusyPercent", round(100.0 * gpuNanos / totalNanos, 1));
             summary.addProperty("submitWaitMsPerFrame", round(submitWait / 1.0e6 / frames, 3));
-            summary.addProperty("cpuMsPerFrame", round((totalNanos - submitWait) / 1.0e6 / frames, 3));
+            summary.addProperty("drawableWaitMsPerFrame", round(drawableWait / 1.0e6 / frames, 3));
+            summary.addProperty("cpuMsPerFrame", round((totalNanos - submitWait - drawableWait) / 1.0e6 / frames, 3));
         }
 
         Counters.snapshot(countersNow);
@@ -140,6 +144,7 @@ final class FrameRecorder {
         env.addProperty("framebufferWidth", mc.getWindow().getWidth());
         env.addProperty("framebufferHeight", mc.getWindow().getHeight());
         env.addProperty("renderDistance", mc.options.getEffectiveRenderDistance());
+        env.addProperty("presented", !Benchmark.OFFSCREEN);
         env.addProperty("world", Benchmark.WORLD_NAME);
         env.addProperty("seed", Benchmark.SEED);
         env.addProperty("warmupSeconds", Benchmark.WARMUP_SECONDS);

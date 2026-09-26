@@ -21,7 +21,7 @@ loom {
 
 	runs {
 		// ./gradlew runBenchmark [-Pbench.label=x] [-Pbench.duration=30] [-Pbench.warmup=20]
-		//   [-Pbench.renderDistance=16] [-Pbench.width=1600] [-Pbench.height=900]
+		//   [-Pbench.renderDistance=16] [-Pbench.width=1600] [-Pbench.height=900] [-Pbench.present=true]
 		// Results land in run/metallum-bench/. Prefer scripts/bench.py, which also compares runs.
 		benchmark {
 			inherit client
@@ -34,7 +34,8 @@ loom {
 					"-Dmetallum.bench.commit=${benchCommit()}",
 					"-Dmetallum.bench.duration=${findProperty('bench.duration') ?: 30}",
 					"-Dmetallum.bench.warmup=${findProperty('bench.warmup') ?: 20}",
-					"-Dmetallum.bench.renderDistance=${findProperty('bench.renderDistance') ?: 16}"
+					"-Dmetallum.bench.renderDistance=${findProperty('bench.renderDistance') ?: 16}",
+					"-Dmetallum.bench.present=${findProperty('bench.present') ?: false}"
 			)
 		}
 	}

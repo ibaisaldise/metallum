@@ -22,6 +22,8 @@ public final class Counters {
     public static long gpuSamples;
     /** Render-thread time spent blocked in submit() waiting for an older frame to finish on the GPU. */
     public static long submitWaitNanos;
+    /** Render-thread time spent blocked in CAMetalLayer.nextDrawable (display/compositor pacing). */
+    public static long drawableWaitNanos;
 
     static final String[] NAMES = {
             "drawCalls", "renderEncoders", "blitEncoders", "commandBuffers", "pipelineBinds",

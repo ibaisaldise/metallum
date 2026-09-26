@@ -29,6 +29,11 @@ import java.util.concurrent.TimeUnit;
  */
 public final class Benchmark {
     public static final boolean ENABLED = Boolean.getBoolean("metallum.bench");
+    /**
+     * Render every frame but never present it. A windowed CAMetalLayer hands out drawables at the
+     * display's refresh rate even with display sync off, which would cap (and hide) rendering speed.
+     */
+    public static final boolean OFFSCREEN = ENABLED && !Boolean.getBoolean("metallum.bench.present");
 
     static final String WORLD_NAME = System.getProperty("metallum.bench.world", "metallum-bench");
     static final long SEED = Long.getLong("metallum.bench.seed", 20260926L);

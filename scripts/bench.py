@@ -44,6 +44,7 @@ METRICS = [
     ("summary.frameMs.max", "frame ms max", False),
     ("summary.cpuMsPerFrame", "CPU ms/frame", False),
     ("summary.submitWaitMsPerFrame", "GPU wait ms/frame", False),
+    ("summary.drawableWaitMsPerFrame", "drawable wait ms/frame", False),
     ("summary.gpuMsPerSubmit", "GPU ms/submit", False),
     ("summary.gpuBusyPercent", "GPU busy %", None),
     ("summary.perFrame.drawCalls", "draws/frame", False),
@@ -111,8 +112,9 @@ def fmt(value):
 def describe(name, results):
     env = results[0]["environment"]
     commits = sorted({r.get("commit", "?") for r in results})
+    mode = "presented" if env.get("presented", True) else "offscreen"
     return (f"{name}: {len(results)} run(s), commit {', '.join(commits)}, {env.get('backend')} on {env.get('device')}, "
-            f"{env.get('framebufferWidth')}x{env.get('framebufferHeight')}, RD {env.get('renderDistance')}")
+            f"{env.get('framebufferWidth')}x{env.get('framebufferHeight')}, RD {env.get('renderDistance')}, {mode}")
 
 
 def show(specs):
@@ -193,11 +195,12 @@ def compare(base_spec, cand_spec):
     print(describe("candidate", cand))
     for label, results in (("baseline", base), ("candidate", cand)):
         env = results[0]["environment"]
-        key = (env.get("framebufferWidth"), env.get("framebufferHeight"), env.get("renderDistance"), env.get("seed"))
+        key = (env.get("framebufferWidth"), env.get("framebufferHeight"), env.get("renderDistance"), env.get("seed"),
+               env.get("presented", True))
         if label == "baseline":
             base_key = key
         elif key != base_key:
-            print("WARNING: runs used different resolution/render distance/seed; comparison is not like-for-like")
+            print("WARNING: runs used different resolution/render distance/seed/presentation; comparison is not like-for-like")
     print()
     print(f"  {'metric':<26}{'baseline':>12}{'candidate':>12}{'change':>10}   noise")
     for path, name, higher_better in METRICS:
@@ -252,7 +255,8 @@ def launch(env, label, args, warmup, duration, project=ROOT):
     """One game launch of the checkout in `project`. Returns the result path (in RESULTS), or exits on failure."""
     cmd = [os.path.join(project, "gradlew"), "runBenchmark", "--console=plain", "-q",
            f"-Pbench.label={label}", f"-Pbench.duration={duration}", f"-Pbench.warmup={warmup}",
-           f"-Pbench.renderDistance={args.render_distance}", f"-Pbench.width={args.width}", f"-Pbench.height={args.height}"]
+           f"-Pbench.renderDistance={args.render_distance}", f"-Pbench.width={args.width}", f"-Pbench.height={args.height}",
+           f"-Pbench.present={str(args.present).lower()}"]
     os.makedirs(RESULTS, exist_ok=True)
     log_path = os.path.join(RESULTS, f"{label}.log")
     project_results = os.path.join(project, "run", "metallum-bench")
@@ -382,7 +386,8 @@ def profile(args):
     out = os.path.join(RESULTS, f"{label}-{time.strftime('%Y%m%d-%H%M%S')}.collapsed")
     cmd = [os.path.join(ROOT, "gradlew"), "runBenchmark", "--console=plain", "-q",
            f"-Pbench.label={label}", f"-Pbench.duration={args.duration}", f"-Pbench.warmup={args.warmup}",
-           f"-Pbench.renderDistance={args.render_distance}", f"-Pbench.width={args.width}", f"-Pbench.height={args.height}"]
+           f"-Pbench.renderDistance={args.render_distance}", f"-Pbench.width={args.width}", f"-Pbench.height={args.height}",
+           f"-Pbench.present={str(args.present).lower()}"]
     print(f"profiling '{label}' (~{args.warmup + args.duration + 25}s)...", flush=True)
     pattern = re.compile(r"\[metallum-bench\] recording for \d+s \(pid (\d+)\)")
     profiler = None
@@ -496,6 +501,9 @@ def main():
     run_options.add_argument("--height", type=int, default=900)
     run_options.add_argument("--cooldown", type=int, default=5, help="seconds to idle between runs")
     run_options.add_argument("--regenerate", action="store_true", help="rebuild the pre-generated world template first")
+    run_options.add_argument("--present", action="store_true",
+                             help="present frames to the window (capped at the display refresh rate); "
+                                  "by default frames are rendered but not presented, to measure rendering speed")
 
     sub.add_parser("run", parents=[run_options], help="run the benchmark N times")
 
