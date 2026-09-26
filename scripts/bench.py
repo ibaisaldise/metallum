@@ -264,6 +264,9 @@ def launch(env, label, args, warmup, duration, project=ROOT):
         sys.exit(f"benchmark run failed (exit {code}); see {log_path}")
     result = max(new, key=os.path.getmtime)
     if project != ROOT:
+        screenshot = result.replace(".json", ".png")
+        if os.path.isfile(screenshot):
+            shutil.move(screenshot, os.path.join(RESULTS, os.path.basename(screenshot)))
         moved = os.path.join(RESULTS, os.path.basename(result))
         shutil.move(result, moved)
         result = moved
