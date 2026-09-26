@@ -5,12 +5,15 @@ import net.minecraft.client.InactivityFpsLimit;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
 import net.minecraft.client.Screenshot;
+import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.Difficulty;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.LevelSettings;
 import net.minecraft.world.level.WorldDataConfiguration;
+import net.minecraft.world.level.storage.LevelData;
+import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.level.levelgen.WorldOptions;
 import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
@@ -41,6 +44,7 @@ public final class Benchmark {
     static final int WARMUP_SECONDS = Integer.getInteger("metallum.bench.warmup", 20);
     static final int DURATION_SECONDS = Integer.getInteger("metallum.bench.duration", 30);
     private static final float PITCH = 0.0F;
+    private static final double HOVER_HEIGHT = 2.0;
     private static final long TIMEOUT_NANOS = TimeUnit.MINUTES.toNanos(5);
 
     private enum Phase { BOOT, LOADING, WARMUP, RECORD, SCREENSHOT, DONE }
@@ -49,6 +53,7 @@ public final class Benchmark {
     private static long bootedAt = -1L;
     private static long phaseStartedAt;
     private static float startYaw;
+    private static Vec3 anchor = Vec3.ZERO;
     private static final FrameRecorder RECORDER = new FrameRecorder();
     private static final int SCREENSHOT_SETTLE_FRAMES = 10;
     private static final long SCREENSHOT_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(5);
@@ -86,7 +91,12 @@ public final class Benchmark {
                 if (mc.level != null && mc.player != null && mc.gui.screen() == null) {
                     mc.player.getAbilities().flying = true;
                     mc.player.onUpdateAbilities();
-                    startYaw = mc.player.getYRot();
+                    // The world spawn is fixed by the seed; where the player ended up after loading isn't
+                    // (they can fall for a few ticks first), so pin the camera to the spawn instead.
+                    LevelData.RespawnData spawn = mc.level.getLevelData().getRespawnData();
+                    anchor = Vec3.atBottomCenterOf(spawn.pos()).add(0.0, HOVER_HEIGHT, 0.0);
+                    startYaw = spawn.yaw();
+                    hold(mc.player, startYaw);
                     runCommand(mc, "tick unfreeze");
                     runCommand(mc, "time set noon");
                     runCommand(mc, "weather clear");
@@ -116,7 +126,7 @@ public final class Benchmark {
                     resultsFile = RECORDER.writeResults(mc, null);
                     // Back at the starting angle with the HUD hidden: the frozen world should render
                     // identically on every run, so scripts/bench.py can diff it against the baseline.
-                    mc.player.absSnapRotationTo(startYaw, PITCH);
+                    hold(mc.player, startYaw);
                     if (!mc.gui.hud.isHidden()) {
                         mc.gui.hud.toggle();
                     }
@@ -127,7 +137,13 @@ public final class Benchmark {
                 if (resultsFile == null || screenshotDone || now - phaseStartedAt > SCREENSHOT_TIMEOUT_NANOS) {
                     phase = Phase.DONE;
                     mc.stop();
-                } else if (++screenshotFrames == SCREENSHOT_SETTLE_FRAMES) {
+                } else {
+                    if (mc.player != null) {
+                        hold(mc.player, startYaw);
+                    }
+                    if (++screenshotFrames != SCREENSHOT_SETTLE_FRAMES) {
+                        return;
+                    }
                     Path png = resultsFile.resolveSibling(resultsFile.getFileName().toString().replace(".json", ".png"));
                     Screenshot.takeScreenshot(mc.gameRenderer.mainRenderTarget(), image -> {
                         try (image) {
@@ -156,8 +172,15 @@ public final class Benchmark {
             return false;
         }
         double t = (double) (now - phaseStartedAt) / TimeUnit.SECONDS.toNanos(periodSeconds);
-        mc.player.absSnapRotationTo(startYaw + (float) (360.0 * Math.min(t, 1.0)), PITCH);
+        hold(mc.player, startYaw + (float) (360.0 * Math.min(t, 1.0)));
         return true;
+    }
+
+    /** Keep the camera exactly at the anchor, motionless, looking at {@code yaw}. */
+    private static void hold(final LocalPlayer player, final float yaw) {
+        player.setDeltaMovement(Vec3.ZERO);
+        player.snapTo(anchor.x, anchor.y, anchor.z);
+        player.absSnapRotationTo(yaw, PITCH);
     }
 
     private static void applyOptions(final Options options) {
