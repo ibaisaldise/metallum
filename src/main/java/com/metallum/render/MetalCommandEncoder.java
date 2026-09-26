@@ -1,5 +1,6 @@
 package com.metallum.render;
 
+import com.metallum.bench.Counters;
 import com.metallum.mtl.*;
 import com.metallum.objc.ObjC;
 import com.metallum.objc.ObjCBlock;
@@ -114,11 +115,18 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
         currentSubmitIndex++;
 
+        long waitStart = System.nanoTime();
         if (!awaitSubmitCompletion(currentSubmitIndex - MAX_SUBMITS_IN_FLIGHT, 5000L)) {
             throw new IllegalStateException("5s timeout reached when waiting for Metal submit completion");
         }
+        Counters.submitWaitNanos += System.nanoTime() - waitStart;
 
         if (toClose != null) {
+            long gpuNanos = toClose.buffer.gpuTimeNanos();
+            if (gpuNanos >= 0L) {
+                Counters.gpuNanos += gpuNanos;
+                Counters.gpuSamples++;
+            }
             toClose.buffer.close();
         }
 
@@ -303,6 +311,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     public void writeToBuffer(final GpuBufferSlice destination, final ByteBuffer data) {
         MetalGpuBuffer buffer = (MetalGpuBuffer) destination.buffer();
         int length = data.remaining();
+        Counters.uploadBytes += length;
 
         if (buffer.isDynamic()) {
             orphanWrite(buffer, destination.offset(), data);
@@ -387,6 +396,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         int pixelSize = metalDst.pixelSize();
         int rowBytes = width * pixelSize;
         int bytesPerImage = rowBytes * height;
+        Counters.uploadBytes += bytesPerImage;
         GpuBufferSlice slice = transientMemory.uploadStaging(source.duplicate().limit(bytesPerImage), pixelSize, GpuBuffer.USAGE_COPY_SRC);
 
         MTLBlitCommandEncoder blit = blitCommandEncoder();

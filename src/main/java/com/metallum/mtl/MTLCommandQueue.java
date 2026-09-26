@@ -1,5 +1,6 @@
 package com.metallum.mtl;
 
+import com.metallum.bench.Counters;
 import com.metallum.objc.AutoreleasePool;
 import com.metallum.objc.Msg;
 import com.metallum.objc.ObjC;
@@ -36,6 +37,7 @@ public final class MTLCommandQueue {
     }
 
     public MTLCommandBuffer makeCommandBuffer(@Nullable final String label) {
+        Counters.commandBuffers++;
         try (AutoreleasePool _ = AutoreleasePool.push()) {
             MemorySegment commandBuffer = COMMAND_BUFFER.sendPtr(handle);
             if (ObjC.isNil(commandBuffer)) {

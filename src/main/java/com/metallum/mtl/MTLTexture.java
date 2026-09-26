@@ -1,5 +1,6 @@
 package com.metallum.mtl;
 
+import com.metallum.bench.Counters;
 import com.metallum.objc.AutoreleasePool;
 import com.metallum.objc.Msg;
 import com.metallum.objc.ObjC;
@@ -77,6 +78,7 @@ public final class MTLTexture {
             if (pixelFormat == MTLPixelFormat.Invalid.value || width <= 0 || bytesPerRow <= 0 || offset < 0) {
                 return MemorySegment.NULL;
             }
+            Counters.texelViewsCreated++;
             long bufferLength = LENGTH.sendLong(buffer);
             if (offset > bufferLength || bytesPerRow > bufferLength - offset) {
                 return MemorySegment.NULL;

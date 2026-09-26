@@ -1,5 +1,6 @@
 package com.metallum.mtl;
 
+import com.metallum.bench.Counters;
 import com.metallum.objc.Msg;
 import com.metallum.objc.ObjC;
 import net.fabricmc.api.EnvType;
@@ -46,6 +47,7 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
     }
 
     public void setRenderPipelineState(final MemorySegment pipeline) {
+        Counters.pipelineBinds++;
         SET_RENDER_PIPELINE_STATE.send(handle(), ObjC.orNil(pipeline));
     }
 
@@ -70,34 +72,42 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
     }
 
     public void setVertexBuffer(final MTLBuffer buffer, final long offset, final long index) {
+        Counters.bufferBinds++;
         SET_VERTEX_BUFFER.send(handle(), seg(buffer), offset, index);
     }
 
     public void setFragmentBuffer(final MTLBuffer buffer, final long offset, final long index) {
+        Counters.bufferBinds++;
         SET_FRAGMENT_BUFFER.send(handle(), seg(buffer), offset, index);
     }
 
     public void setVertexBufferOffset(final long offset, final long index) {
+        Counters.bufferBinds++;
         SET_VERTEX_BUFFER_OFFSET.send(handle(), offset, index);
     }
 
     public void setFragmentBufferOffset(final long offset, final long index) {
+        Counters.bufferBinds++;
         SET_FRAGMENT_BUFFER_OFFSET.send(handle(), offset, index);
     }
 
     public void setVertexTexture(final MemorySegment texture, final long index) {
+        Counters.textureBinds++;
         SET_VERTEX_TEXTURE.send(handle(), ObjC.orNil(texture), index);
     }
 
     public void setFragmentTexture(final MemorySegment texture, final long index) {
+        Counters.textureBinds++;
         SET_FRAGMENT_TEXTURE.send(handle(), ObjC.orNil(texture), index);
     }
 
     public void setVertexSamplerState(final MemorySegment sampler, final long index) {
+        Counters.samplerBinds++;
         SET_VERTEX_SAMPLER.send(handle(), ObjC.orNil(sampler), index);
     }
 
     public void setFragmentSamplerState(final MemorySegment sampler, final long index) {
+        Counters.samplerBinds++;
         SET_FRAGMENT_SAMPLER.send(handle(), ObjC.orNil(sampler), index);
     }
 
@@ -144,18 +154,22 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
     }
 
     public void drawPrimitives(final MTLPrimitiveType primitiveType, final int firstVertex, final int vertexCount, final int instanceCount, final int baseInstance) {
+        Counters.drawCalls++;
         DRAW_PRIMITIVES.send(handle(), primitiveType.value, firstVertex, vertexCount, instanceCount, baseInstance);
     }
 
     public void drawIndexedPrimitives(final MTLPrimitiveType primitiveType, final int indexCount, final MTLIndexType indexType, final MTLBuffer indexBuffer, final long offset, final int instanceCount, final int baseVertex, final int baseInstance) {
+        Counters.drawCalls++;
         DRAW_INDEXED.send(handle(), primitiveType.value, indexCount, indexType.value, indexBuffer.handle(), offset, instanceCount, baseVertex, baseInstance);
     }
 
     public void drawIndexedPrimitivesIndirect(final MTLPrimitiveType primitiveType, final MTLIndexType indexType, final MTLBuffer indexBuffer, final MTLBuffer indirectBuffer, final long indirectBufferOffset) {
+        Counters.drawCalls++;
         DRAW_INDEXED_INDIRECT.send(handle(), primitiveType.value, indexType.value, indexBuffer.handle(), 0L, indirectBuffer.handle(), indirectBufferOffset);
     }
 
     public void drawPrimitivesIndirect(final MTLPrimitiveType primitiveType, final MTLBuffer indirectBuffer, final long indirectBufferOffset) {
+        Counters.drawCalls++;
         DRAW_INDIRECT.send(handle(), primitiveType.value, indirectBuffer.handle(), indirectBufferOffset);
     }
 

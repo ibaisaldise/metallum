@@ -6,6 +6,7 @@
   "mixins": [
   ],
   "client": [
+    "bench.MinecraftBenchmarkMixin",
     "render.PreferredGraphicsApiMixin",
     "sodium.DrawBackendMixin",
     "sodium.DrawContextMixin",

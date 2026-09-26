@@ -6,8 +6,38 @@ plugins {
 version = project.mod_version
 group = project.maven_group
 
+def benchCommit = {
+	try {
+		def hash = providers.exec { commandLine 'git', 'rev-parse', '--short', 'HEAD' }.standardOutput.asText.get().trim()
+		def dirty = !providers.exec { commandLine 'git', 'status', '--porcelain', '--untracked-files=no' }.standardOutput.asText.get().trim().isEmpty()
+		return dirty ? "${hash}-dirty" : hash
+	} catch (Exception ignored) {
+		return "unknown"
+	}
+}
+
 loom {
 	accessWidenerPath = file("src/main/resources/metallum.accesswidener")
+
+	runs {
+		// ./gradlew runBenchmark [-Pbench.label=x] [-Pbench.duration=30] [-Pbench.warmup=20]
+		//   [-Pbench.renderDistance=16] [-Pbench.width=1600] [-Pbench.height=900]
+		// Results land in run/metallum-bench/. Prefer scripts/bench.py, which also compares runs.
+		benchmark {
+			inherit client
+			configName = "Benchmark"
+			ideConfigGenerated = false
+			programArgs "--width", "${findProperty('bench.width') ?: 1600}", "--height", "${findProperty('bench.height') ?: 900}"
+			vmArgs(
+					"-Dmetallum.bench=true",
+					"-Dmetallum.bench.label=${findProperty('bench.label') ?: 'run'}",
+					"-Dmetallum.bench.commit=${benchCommit()}",
+					"-Dmetallum.bench.duration=${findProperty('bench.duration') ?: 30}",
+					"-Dmetallum.bench.warmup=${findProperty('bench.warmup') ?: 20}",
+					"-Dmetallum.bench.renderDistance=${findProperty('bench.renderDistance') ?: 16}"
+			)
+		}
+	}
 }
 
 repositories {

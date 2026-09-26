@@ -1,5 +1,6 @@
 package com.metallum.mtl;
 
+import com.metallum.bench.Counters;
 import com.metallum.objc.AutoreleasePool;
 import com.metallum.objc.Msg;
 import com.metallum.objc.ObjC;
@@ -11,6 +12,7 @@ import org.jspecify.annotations.Nullable;
 import java.lang.foreign.MemorySegment;
 
 import static java.lang.foreign.ValueLayout.ADDRESS;
+import static java.lang.foreign.ValueLayout.JAVA_DOUBLE;
 import static java.lang.foreign.ValueLayout.JAVA_LONG;
 
 @Environment(EnvType.CLIENT)
@@ -27,6 +29,8 @@ public final class MTLCommandBuffer {
     private static final Msg WAIT_UNTIL_COMPLETED = Msg.ofVoid("waitUntilCompleted", true);
     private static final Msg PUSH_DEBUG_GROUP = Msg.ofVoid("pushDebugGroup:", ADDRESS);
     private static final Msg POP_DEBUG_GROUP = Msg.ofVoid("popDebugGroup");
+    private static final Msg GPU_START_TIME = Msg.of("GPUStartTime", JAVA_DOUBLE);
+    private static final Msg GPU_END_TIME = Msg.of("GPUEndTime", JAVA_DOUBLE);
 
     private MemorySegment handle;
 
@@ -35,6 +39,7 @@ public final class MTLCommandBuffer {
     }
 
     public MTLBlitCommandEncoder makeBlitCommandEncoder() {
+        Counters.blitEncoders++;
         try (AutoreleasePool _ = AutoreleasePool.push()) {
             MemorySegment encoder = BLIT_COMMAND_ENCODER.sendPtr(handle());
             if (ObjC.isNil(encoder)) {
@@ -45,6 +50,7 @@ public final class MTLCommandBuffer {
     }
 
     MTLRenderCommandEncoder makeRenderCommandEncoder(final MTLRenderPassDescriptor descriptor) {
+        Counters.renderEncoders++;
         try (AutoreleasePool _ = AutoreleasePool.push()) {
             MemorySegment encoder = RENDER_COMMAND_ENCODER.sendPtr(handle(), descriptor.handle());
             if (ObjC.isNil(encoder)) {
@@ -173,6 +179,18 @@ public final class MTLCommandBuffer {
 
     public void popDebugGroup() {
         POP_DEBUG_GROUP.send(handle());
+    }
+
+    /**
+     * GPU execution time in nanoseconds, or -1 if the buffer has not completed.
+     */
+    public long gpuTimeNanos() {
+        if (!isCompleted()) {
+            return -1L;
+        }
+        double start = GPU_START_TIME.sendDouble(handle);
+        double end = GPU_END_TIME.sendDouble(handle);
+        return end > start ? (long) ((end - start) * 1.0e9) : -1L;
     }
 
     public void close() {
