@@ -1,5 +1,6 @@
 package com.metallum.mtl;
 
+import com.metallum.bench.Counters;
 import com.metallum.Metallum;
 import com.metallum.objc.AutoreleasePool;
 import com.metallum.objc.Msg;
@@ -67,6 +68,7 @@ public record MTLDevice(MemorySegment handle) {
     }
 
     public MTLBuffer newBuffer(final long length, final long options) {
+        Counters.buffersCreated++;
         MemorySegment buffer = NEW_BUFFER.sendPtr(handle, length, options);
         if (ObjC.isNil(buffer)) {
             throw new IllegalStateException("newBufferWithLength:options: returned nil (length=" + length + ")");

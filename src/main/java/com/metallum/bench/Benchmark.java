@@ -4,6 +4,7 @@ import com.metallum.Metallum;
 import net.minecraft.client.InactivityFpsLimit;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
+import net.minecraft.client.Screenshot;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.world.Difficulty;
 import net.minecraft.world.level.GameType;
@@ -12,6 +13,10 @@ import net.minecraft.world.level.WorldDataConfiguration;
 import net.minecraft.world.level.levelgen.WorldOptions;
 import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
+import org.jspecify.annotations.Nullable;
+
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -32,13 +37,19 @@ public final class Benchmark {
     private static final float PITCH = 0.0F;
     private static final long TIMEOUT_NANOS = TimeUnit.MINUTES.toNanos(5);
 
-    private enum Phase { BOOT, LOADING, WARMUP, RECORD, DONE }
+    private enum Phase { BOOT, LOADING, WARMUP, RECORD, SCREENSHOT, DONE }
 
     private static Phase phase = Phase.BOOT;
     private static long bootedAt = -1L;
     private static long phaseStartedAt;
     private static float startYaw;
     private static final FrameRecorder RECORDER = new FrameRecorder();
+    private static final int SCREENSHOT_SETTLE_FRAMES = 10;
+    private static final long SCREENSHOT_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(5);
+    @Nullable
+    private static Path resultsFile;
+    private static int screenshotFrames;
+    private static volatile boolean screenshotDone;
 
     private Benchmark() {
     }
@@ -49,7 +60,7 @@ public final class Benchmark {
         if (bootedAt < 0L) {
             bootedAt = now;
         }
-        if (phase != Phase.RECORD && phase != Phase.DONE && now - bootedAt > TIMEOUT_NANOS) {
+        if ((phase == Phase.BOOT || phase == Phase.LOADING || phase == Phase.WARMUP) && now - bootedAt > TIMEOUT_NANOS) {
             abort(mc, "timed out in phase " + phase);
             return;
         }
@@ -82,7 +93,8 @@ public final class Benchmark {
                 if (now - phaseStartedAt >= TimeUnit.SECONDS.toNanos(WARMUP_SECONDS)) {
                     runCommand(mc, "time set noon");
                     runCommand(mc, "tick freeze");
-                    Metallum.LOGGER.info("[metallum-bench] recording for {}s", DURATION_SECONDS);
+                    // scripts/bench.py profile watches for this line to attach a profiler to the recorded window.
+                    Metallum.LOGGER.info("[metallum-bench] recording for {}s (pid {})", DURATION_SECONDS, ProcessHandle.current().pid());
                     enterPhase(Phase.RECORD, now);
                     RECORDER.start(now);
                 }
@@ -93,9 +105,30 @@ public final class Benchmark {
                     return;
                 }
                 if (now - phaseStartedAt >= TimeUnit.SECONDS.toNanos(DURATION_SECONDS)) {
+                    resultsFile = RECORDER.writeResults(mc, null);
+                    // Back at the starting angle with the HUD hidden: the frozen world should render
+                    // identically on every run, so scripts/bench.py can diff it against the baseline.
+                    mc.player.absSnapRotationTo(startYaw, PITCH);
+                    if (!mc.gui.hud.isHidden()) {
+                        mc.gui.hud.toggle();
+                    }
+                    enterPhase(Phase.SCREENSHOT, now);
+                }
+            }
+            case SCREENSHOT -> {
+                if (resultsFile == null || screenshotDone || now - phaseStartedAt > SCREENSHOT_TIMEOUT_NANOS) {
                     phase = Phase.DONE;
-                    RECORDER.writeResults(mc, null);
                     mc.stop();
+                } else if (++screenshotFrames == SCREENSHOT_SETTLE_FRAMES) {
+                    Path png = resultsFile.resolveSibling(resultsFile.getFileName().toString().replace(".json", ".png"));
+                    Screenshot.takeScreenshot(mc.gameRenderer.mainRenderTarget(), image -> {
+                        try (image) {
+                            image.writeToFile(png);
+                        } catch (IOException e) {
+                            Metallum.LOGGER.error("[metallum-bench] failed to write screenshot", e);
+                        }
+                        screenshotDone = true;
+                    });
                 }
             }
             case DONE -> {

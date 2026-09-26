@@ -16,6 +16,7 @@ public final class Counters {
     public static long texelViewsCreated;
     public static long uploadBytes;
     public static long pipelineCompiles;
+    public static long buffersCreated;
     /** GPU execution time of retired command buffers. Lags the CPU by up to MAX_SUBMITS_IN_FLIGHT frames. */
     public static long gpuNanos;
     public static long gpuSamples;
@@ -24,7 +25,7 @@ public final class Counters {
 
     static final String[] NAMES = {
             "drawCalls", "renderEncoders", "blitEncoders", "commandBuffers", "pipelineBinds",
-            "bufferBinds", "textureBinds", "samplerBinds", "texelViewsCreated", "uploadBytes", "pipelineCompiles"
+            "bufferBinds", "textureBinds", "samplerBinds", "texelViewsCreated", "uploadBytes", "pipelineCompiles", "buffersCreated"
     };
 
     private Counters() {
@@ -42,5 +43,6 @@ public final class Counters {
         out[8] = texelViewsCreated;
         out[9] = uploadBytes;
         out[10] = pipelineCompiles;
+        out[11] = buffersCreated;
     }
 }

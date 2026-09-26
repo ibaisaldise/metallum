@@ -5,6 +5,8 @@
   scripts/bench.py show [LABEL|FILE ...]
   scripts/bench.py compare BASELINE CANDIDATE
   scripts/bench.py ab [REF] [--label L] [--runs N]    # interleaved REF (default HEAD) vs working tree
+  scripts/bench.py profile                            # one run under async-profiler + render-thread breakdown
+  scripts/bench.py analyze FILE.collapsed [--thread NAME]
 
 `run` launches `./gradlew runBenchmark` N times (a fixed-seed world, camera spin, then quit) and prints
 the median of the runs. The first time, it generates the world in a longer preparation run and keeps it
@@ -19,6 +21,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shutil
 import statistics
 import subprocess
@@ -53,6 +56,7 @@ METRICS = [
     ("summary.perFrame.texelViewsCreated", "texel views/frame", False),
     ("summary.perFrame.uploadBytes", "upload bytes/frame", False),
     ("summary.perFrame.pipelineCompiles", "pipeline compiles/frame", False),
+    ("summary.perFrame.buffersCreated", "MTLBuffers created/frame", False),
 ]
 
 
@@ -124,6 +128,65 @@ def show(specs):
         print()
 
 
+def read_pixels(path):
+    """(width, height, rows of pixel bytes, bytes per pixel), via macOS `sips` converting the PNG to an uncompressed BMP."""
+    out = os.path.join(RESULTS, ".diff.bmp")
+    subprocess.check_call(["sips", "-s", "format", "bmp", path, "--out", out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with open(out, "rb") as f:
+        data = f.read()
+    os.remove(out)
+    offset = int.from_bytes(data[10:14], "little")
+    width = int.from_bytes(data[18:22], "little", signed=True)
+    height = abs(int.from_bytes(data[22:26], "little", signed=True))
+    bpp = int.from_bytes(data[28:30], "little") // 8
+    stride = (width * bpp + 3) & ~3
+    rows = [data[offset + y * stride:offset + y * stride + width * bpp] for y in range(height)]
+    return width, height, rows, bpp
+
+
+def image_diff(a_path, b_path, threshold=8):
+    """Fraction of pixels whose largest channel difference exceeds `threshold`, and the largest difference."""
+    aw, ah, a_rows, bpp = read_pixels(a_path)
+    bw, bh, b_rows, b_bpp = read_pixels(b_path)
+    if (aw, ah, bpp) != (bw, bh, b_bpp):
+        return 1.0, 255
+    differing, worst = 0, 0
+    for a_row, b_row in zip(a_rows, b_rows):
+        if a_row == b_row:
+            continue
+        for x in range(0, len(a_row), bpp):
+            d = max(abs(a_row[x + i] - b_row[x + i]) for i in range(3))
+            if d > threshold:
+                differing += 1
+            worst = max(worst, d)
+    return differing / (aw * ah), worst
+
+
+def screenshots(spec):
+    if os.path.isfile(spec):
+        paths = [spec.replace(".json", ".png")]
+    else:
+        paths = sorted(glob.glob(os.path.join(RESULTS, f"{spec}-[0-9]*-[0-9]*.png")))
+    return [p for p in paths if os.path.isfile(p)]
+
+
+def compare_images(base_spec, cand_spec):
+    base, cand = screenshots(base_spec), screenshots(cand_spec)
+    if not base or not cand:
+        print("\nscreenshots: not available for both sides")
+        return
+    # Baseline-vs-baseline shows how deterministic the scene is; the candidate should be no further off.
+    noise = image_diff(base[0], base[1]) if len(base) > 1 else None
+    diff = image_diff(base[0], cand[0])
+    line = f"\nscreenshot diff vs baseline: {100 * diff[0]:.3f}% of pixels differ (max channel delta {diff[1]})"
+    if noise is not None:
+        line += f"; baseline run-to-run: {100 * noise[0]:.3f}% (max {noise[1]})"
+    print(line)
+    if diff[0] > max(0.001, 2 * (noise[0] if noise else 0)):
+        print(f"WARNING: the candidate renders differently. Compare {os.path.relpath(base[0], ROOT)} "
+              f"and {os.path.relpath(cand[0], ROOT)}")
+
+
 def compare(base_spec, cand_spec):
     base, cand = load(base_spec), load(cand_spec)
     print(describe("baseline ", base))
@@ -152,6 +215,7 @@ def compare(base_spec, cand_spec):
             noise = 0
         print(f"  {name:<26}{fmt(b):>12}{fmt(c):>12}{change:>10}   " + (f"±{noise:.1f}%" if noise else ""))
     print("\n✓/✗ = better/worse by more than the run-to-run noise (or 1%). Use --runs 3+ for a usable noise estimate.")
+    compare_images(base_spec, cand_spec)
 
 
 def java_home():
@@ -244,6 +308,7 @@ def measure(env, args, template, label, project=ROOT):
     if generated > 0:
         print(f"      WARNING: {generated} new chunks were generated during this run; "
               f"regenerate the template with --regenerate", file=sys.stderr)
+    return result
 
 
 def run(args):
@@ -298,6 +363,122 @@ def ab(args):
     compare(base_label, label)
 
 
+def profile(args):
+    """One run with async-profiler attached for exactly the recorded window, then a CPU breakdown."""
+    asprof = shutil.which("asprof")
+    if not asprof:
+        sys.exit("async-profiler not found; install it with `brew install async-profiler`")
+    label = args.label or f"profile-{current_commit()}"
+    env, template = setup(args)
+    world = world_dir(ROOT)
+    shutil.rmtree(world, ignore_errors=True)
+    shutil.copytree(template, world)
+
+    os.makedirs(RESULTS, exist_ok=True)
+    log_path = os.path.join(RESULTS, f"{label}.log")
+    out = os.path.join(RESULTS, f"{label}-{time.strftime('%Y%m%d-%H%M%S')}.collapsed")
+    cmd = [os.path.join(ROOT, "gradlew"), "runBenchmark", "--console=plain", "-q",
+           f"-Pbench.label={label}", f"-Pbench.duration={args.duration}", f"-Pbench.warmup={args.warmup}",
+           f"-Pbench.renderDistance={args.render_distance}", f"-Pbench.width={args.width}", f"-Pbench.height={args.height}"]
+    print(f"profiling '{label}' (~{args.warmup + args.duration + 25}s)...", flush=True)
+    pattern = re.compile(r"\[metallum-bench\] recording for \d+s \(pid (\d+)\)")
+    profiler = None
+    with open(log_path, "w") as log:
+        game = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
+        while game.poll() is None:
+            if profiler is None:
+                with open(log_path) as f:
+                    match = pattern.search(f.read())
+                if match:
+                    # Stop early so the sample never includes shutdown (the log line can arrive late).
+                    profiler = subprocess.Popen(
+                        [asprof, "-d", str(max(1, args.duration - 3)), "-e", "cpu", "-i", "1ms", "-t",
+                         "-o", "collapsed", "-f", out, match.group(1)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+            time.sleep(0.2)
+    if profiler is None:
+        sys.exit(f"benchmark never started recording; see {log_path}")
+    profiler.wait()
+    if game.returncode != 0 or not os.path.isfile(out):
+        sys.exit(f"profiling failed (game exit {game.returncode}); see {log_path}")
+    print(f"      -> {os.path.relpath(out, ROOT)}\n")
+    analyze(out, args.thread, args.top)
+
+
+def clean_frame(frame):
+    frame = re.sub(r"_\[[a-z0-9]\]$", "", frame)
+    return frame.replace("/", ".")
+
+
+def frame_group(frame):
+    """Package (first three segments) for Java frames, library-ish name for native ones."""
+    if "." in frame and not frame.startswith(("-[", "+[")) and " " not in frame and "::" not in frame:
+        parts = frame.split(".")
+        return ".".join(parts[:3]) if len(parts) > 3 else parts[0]
+    return "native: " + frame.split("::")[0].split("(")[0][:48]
+
+
+def thread_name(root):
+    """'[Render thread tid=259]' -> 'Render thread'."""
+    return re.sub(r"\s*tid=\d+\]$", "", root.lstrip("[")).rstrip("]") or root
+
+
+def analyze(collapsed_file, thread, top, match=None):
+    """Per-thread totals, then self and inclusive CPU time per package and method for one thread.
+
+    thread="auto" picks the thread running Minecraft.runTick (the render thread is the process's main
+    thread on macOS, which async-profiler may report under another name such as DestroyJavaVM)."""
+    stacks = []
+    per_thread, render_candidates = {}, {}
+    with open(collapsed_file) as f:
+        for line in f:
+            stack, _, count = line.rstrip("\n").rpartition(" ")
+            frames = stack.split(";")
+            count = int(count)
+            name = thread_name(frames[0])
+            per_thread[name] = per_thread.get(name, 0) + count
+            if "net/minecraft/client/Minecraft.runTick" in stack:
+                render_candidates[name] = render_candidates.get(name, 0) + count
+            stacks.append((name, [clean_frame(fr) for fr in frames[1:]], count))
+    if thread == "auto":
+        if not render_candidates:
+            sys.exit("couldn't find the render thread (no Minecraft.runTick samples)")
+        thread = max(render_candidates, key=render_candidates.get)
+
+    total = sum(per_thread.values())
+    print(f"threads ({total} samples, ~1 ms each, from {os.path.relpath(collapsed_file, ROOT)}):")
+    for name, count in sorted(per_thread.items(), key=lambda kv: -kv[1])[:8]:
+        print(f"    {count:7d}  {name}" + ("   <- analysed" if name == thread else ""))
+
+    self_counts, total_counts, self_groups, total_groups = {}, {}, {}, {}
+    n = 0
+    for name, frames, count in stacks:
+        if name != thread or not frames:
+            continue
+        n += count
+        leaf = frames[-1]
+        self_counts[leaf] = self_counts.get(leaf, 0) + count
+        group = frame_group(leaf)
+        self_groups[group] = self_groups.get(group, 0) + count
+        for fr in set(frames):
+            total_counts[fr] = total_counts.get(fr, 0) + count
+        for group in {frame_group(fr) for fr in frames}:
+            total_groups[group] = total_groups.get(group, 0) + count
+    if not n:
+        sys.exit(f"no samples for thread '{thread}'")
+
+    print(f"\n{thread}: {n} samples")
+    sections = (("inclusive by package", total_groups), ("self by package", self_groups),
+                ("self by method", self_counts), ("inclusive by method", total_counts))
+    if match:
+        pattern = re.compile(match)
+        sections = ((f"inclusive by method matching /{match}/", {k: v for k, v in total_counts.items() if pattern.search(k)}),)
+    for title, counts in sections:
+        print(f"\n  {title}:")
+        for name, count in sorted(counts.items(), key=lambda kv: -kv[1])[:top]:
+            print(f"    {100 * count / n:5.1f}%  {name}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -319,6 +500,16 @@ def main():
                           help="interleaved runs of a baseline git ref vs the working tree, then compare")
     p_ab.add_argument("baseline", nargs="?", default="HEAD", help="git ref to compare against (default: HEAD)")
 
+    p_profile = sub.add_parser("profile", parents=[run_options], help="one run with async-profiler attached, then a CPU breakdown")
+    p_profile.add_argument("--thread", default="auto")
+    p_profile.add_argument("--top", type=int, default=25)
+
+    p_analyze = sub.add_parser("analyze", help="CPU breakdown of a .collapsed file from a profiled run")
+    p_analyze.add_argument("file")
+    p_analyze.add_argument("--thread", default="auto")
+    p_analyze.add_argument("--top", type=int, default=25)
+    p_analyze.add_argument("--match", help="only list methods whose name matches this regex (inclusive time)")
+
     p_show = sub.add_parser("show", help="summarise results")
     p_show.add_argument("specs", nargs="*", help="labels or result files (default: all labels)")
 
@@ -331,6 +522,10 @@ def main():
         run(args)
     elif args.command == "ab":
         ab(args)
+    elif args.command == "profile":
+        profile(args)
+    elif args.command == "analyze":
+        analyze(args.file, args.thread, args.top, args.match)
     elif args.command == "show":
         specs = args.specs or sorted({os.path.basename(p).rsplit("-", 2)[0] for p in glob.glob(os.path.join(RESULTS, "*.json"))})
         show(specs)

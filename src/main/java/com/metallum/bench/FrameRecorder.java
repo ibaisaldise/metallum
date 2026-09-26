@@ -45,7 +45,9 @@ final class FrameRecorder {
         lastFrameAt = now;
     }
 
-    void writeResults(final Minecraft mc, @Nullable final String error) {
+    /** Returns the results file, or null if it couldn't be written. */
+    @Nullable
+    Path writeResults(final Minecraft mc, @Nullable final String error) {
         JsonObject root = new JsonObject();
         root.addProperty("label", System.getProperty("metallum.bench.label", "run"));
         root.addProperty("commit", System.getProperty("metallum.bench.commit", "unknown"));
@@ -70,8 +72,10 @@ final class FrameRecorder {
             Files.createDirectories(dir);
             Files.writeString(file, GSON.toJson(root));
             Metallum.LOGGER.info("[metallum-bench] results written to {}", file.toAbsolutePath());
+            return file;
         } catch (IOException e) {
             Metallum.LOGGER.error("[metallum-bench] failed to write results", e);
+            return null;
         }
     }
 
