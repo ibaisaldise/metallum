@@ -7,8 +7,8 @@ import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.joml.Vector4fc;
 import org.jspecify.annotations.Nullable;
-import org.lwjgl.system.MemoryStack;
 
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 
 import static java.lang.foreign.ValueLayout.*;
@@ -42,95 +42,222 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
     private static final Msg UPDATE_FENCE = Msg.ofVoid("updateFence:afterStages:", ADDRESS, JAVA_LONG);
     private static final Msg WAIT_FOR_FENCE = Msg.ofVoid("waitForFence:beforeStages:", ADDRESS, JAVA_LONG);
 
+    // Shadow of the encoder's bound state, so redundant set* calls never cross into native code.
+    // Handles are compared by address: every resource is released through the deferred destruction
+    // queue, so an address cannot be reused while this encoder is still recording.
+    private static final int TRACKED_BUFFERS = 31;
+    private static final int TRACKED_TEXTURES = 32;
+    private static final int TRACKED_SAMPLERS = 16;
+    private static final long UNKNOWN = -1L;
+
+    private final long[] vertexBuffers = unknown(TRACKED_BUFFERS);
+    private final long[] vertexBufferOffsets = new long[TRACKED_BUFFERS];
+    private final long[] fragmentBuffers = unknown(TRACKED_BUFFERS);
+    private final long[] fragmentBufferOffsets = new long[TRACKED_BUFFERS];
+    private final long[] vertexTextures = unknown(TRACKED_TEXTURES);
+    private final long[] fragmentTextures = unknown(TRACKED_TEXTURES);
+    private final long[] vertexSamplers = unknown(TRACKED_SAMPLERS);
+    private final long[] fragmentSamplers = unknown(TRACKED_SAMPLERS);
+    private long pipeline = UNKNOWN;
+    private long depthStencil = UNKNOWN;
+    private boolean depthBiasSet;
+    private float depthBias;
+    private float depthSlopeScale;
+    private float depthBiasClamp;
+    private long winding = UNKNOWN;
+    private long cullMode = UNKNOWN;
+    private long fillMode = UNKNOWN;
+    private boolean scissorSet;
+    private long scissorX;
+    private long scissorY;
+    private long scissorWidth;
+    private long scissorHeight;
+    private boolean viewportSet;
+    private final double[] viewport = new double[6];
+    // Scratch structs for by-reference arguments. All encoding happens on the render thread.
+    private static final MemorySegment SCISSOR_RECT = Arena.global().allocate(32, 8);
+    private static final MemorySegment VIEWPORT = Arena.global().allocate(48, 8);
+
     MTLRenderCommandEncoder(final MemorySegment handle) {
         super(handle);
     }
 
     public void setRenderPipelineState(final MemorySegment pipeline) {
+        MemorySegment value = ObjC.orNil(pipeline);
+        if (this.pipeline == value.address()) {
+            return;
+        }
+        this.pipeline = value.address();
         Counters.pipelineBinds++;
-        SET_RENDER_PIPELINE_STATE.send(handle(), ObjC.orNil(pipeline));
+        SET_RENDER_PIPELINE_STATE.send(handle(), value);
     }
 
     public void setDepthStencilState(final MemorySegment depthStencilState) {
-        SET_DEPTH_STENCIL_STATE.send(handle(), ObjC.orNil(depthStencilState));
+        MemorySegment value = ObjC.orNil(depthStencilState);
+        if (depthStencil == value.address()) {
+            return;
+        }
+        depthStencil = value.address();
+        SET_DEPTH_STENCIL_STATE.send(handle(), value);
     }
 
     public void setDepthBias(final float depthBias, final float slopeScale, final float clamp) {
+        if (depthBiasSet && this.depthBias == depthBias && depthSlopeScale == slopeScale && depthBiasClamp == clamp) {
+            return;
+        }
+        depthBiasSet = true;
+        this.depthBias = depthBias;
+        depthSlopeScale = slopeScale;
+        depthBiasClamp = clamp;
         SET_DEPTH_BIAS.send(handle(), depthBias, slopeScale, clamp);
     }
 
     public void setFrontFacingWinding(final MTLWinding winding) {
+        if (this.winding == winding.value) {
+            return;
+        }
+        this.winding = winding.value;
         SET_FRONT_FACING_WINDING.send(handle(), winding.value);
     }
 
     public void setCullMode(final MTLCullMode cullMode) {
+        if (this.cullMode == cullMode.value) {
+            return;
+        }
+        this.cullMode = cullMode.value;
         SET_CULL_MODE.send(handle(), cullMode.value);
     }
 
     public void setTriangleFillMode(final MTLTriangleFillMode fillMode) {
+        if (this.fillMode == fillMode.value) {
+            return;
+        }
+        this.fillMode = fillMode.value;
         SET_TRIANGLE_FILL_MODE.send(handle(), fillMode.value);
     }
 
     public void setVertexBuffer(final MTLBuffer buffer, final long offset, final long index) {
+        MemorySegment value = seg(buffer);
+        if (index < TRACKED_BUFFERS) {
+            int slot = (int) index;
+            if (vertexBuffers[slot] == value.address() && value.address() != 0L) {
+                setVertexBufferOffset(offset, index);
+                return;
+            }
+            vertexBuffers[slot] = value.address();
+            vertexBufferOffsets[slot] = offset;
+        }
         Counters.bufferBinds++;
-        SET_VERTEX_BUFFER.send(handle(), seg(buffer), offset, index);
+        SET_VERTEX_BUFFER.send(handle(), value, offset, index);
     }
 
     public void setFragmentBuffer(final MTLBuffer buffer, final long offset, final long index) {
+        MemorySegment value = seg(buffer);
+        if (index < TRACKED_BUFFERS) {
+            int slot = (int) index;
+            if (fragmentBuffers[slot] == value.address() && value.address() != 0L) {
+                setFragmentBufferOffset(offset, index);
+                return;
+            }
+            fragmentBuffers[slot] = value.address();
+            fragmentBufferOffsets[slot] = offset;
+        }
         Counters.bufferBinds++;
-        SET_FRAGMENT_BUFFER.send(handle(), seg(buffer), offset, index);
+        SET_FRAGMENT_BUFFER.send(handle(), value, offset, index);
     }
 
     public void setVertexBufferOffset(final long offset, final long index) {
+        if (index < TRACKED_BUFFERS) {
+            if (vertexBufferOffsets[(int) index] == offset) {
+                return;
+            }
+            vertexBufferOffsets[(int) index] = offset;
+        }
         Counters.bufferBinds++;
         SET_VERTEX_BUFFER_OFFSET.send(handle(), offset, index);
     }
 
     public void setFragmentBufferOffset(final long offset, final long index) {
+        if (index < TRACKED_BUFFERS) {
+            if (fragmentBufferOffsets[(int) index] == offset) {
+                return;
+            }
+            fragmentBufferOffsets[(int) index] = offset;
+        }
         Counters.bufferBinds++;
         SET_FRAGMENT_BUFFER_OFFSET.send(handle(), offset, index);
     }
 
     public void setVertexTexture(final MemorySegment texture, final long index) {
+        MemorySegment value = ObjC.orNil(texture);
+        if (!changed(vertexTextures, index, value.address())) {
+            return;
+        }
         Counters.textureBinds++;
-        SET_VERTEX_TEXTURE.send(handle(), ObjC.orNil(texture), index);
+        SET_VERTEX_TEXTURE.send(handle(), value, index);
     }
 
     public void setFragmentTexture(final MemorySegment texture, final long index) {
+        MemorySegment value = ObjC.orNil(texture);
+        if (!changed(fragmentTextures, index, value.address())) {
+            return;
+        }
         Counters.textureBinds++;
-        SET_FRAGMENT_TEXTURE.send(handle(), ObjC.orNil(texture), index);
+        SET_FRAGMENT_TEXTURE.send(handle(), value, index);
     }
 
     public void setVertexSamplerState(final MemorySegment sampler, final long index) {
+        MemorySegment value = ObjC.orNil(sampler);
+        if (!changed(vertexSamplers, index, value.address())) {
+            return;
+        }
         Counters.samplerBinds++;
-        SET_VERTEX_SAMPLER.send(handle(), ObjC.orNil(sampler), index);
+        SET_VERTEX_SAMPLER.send(handle(), value, index);
     }
 
     public void setFragmentSamplerState(final MemorySegment sampler, final long index) {
+        MemorySegment value = ObjC.orNil(sampler);
+        if (!changed(fragmentSamplers, index, value.address())) {
+            return;
+        }
         Counters.samplerBinds++;
-        SET_FRAGMENT_SAMPLER.send(handle(), ObjC.orNil(sampler), index);
+        SET_FRAGMENT_SAMPLER.send(handle(), value, index);
     }
 
     public void setScissorRect(final long x, final long y, final long width, final long height) {
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            SET_SCISSOR_RECT.send(handle(), MTLScissorRect.on(stack, x, y, width, height));
+        if (scissorSet && scissorX == x && scissorY == y && scissorWidth == width && scissorHeight == height) {
+            return;
         }
+        scissorSet = true;
+        scissorX = x;
+        scissorY = y;
+        scissorWidth = width;
+        scissorHeight = height;
+        SET_SCISSOR_RECT.send(handle(), MTLScissorRect.write(SCISSOR_RECT, x, y, width, height));
     }
 
     public void setViewport(final double originX, final double originY, final double width, final double height, final double znear, final double zfar) {
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            MemorySegment viewport = MemorySegment.ofAddress(stack.nmalloc(8, 48)).reinterpret(48);
-            viewport.set(JAVA_DOUBLE, 0, originX);
-            viewport.set(JAVA_DOUBLE, 8, originY);
-            viewport.set(JAVA_DOUBLE, 16, width);
-            viewport.set(JAVA_DOUBLE, 24, height);
-            viewport.set(JAVA_DOUBLE, 32, znear);
-            viewport.set(JAVA_DOUBLE, 40, zfar);
-            SET_VIEWPORT.send(handle(), viewport);
+        double[] v = viewport;
+        if (viewportSet && v[0] == originX && v[1] == originY && v[2] == width && v[3] == height && v[4] == znear && v[5] == zfar) {
+            return;
         }
+        viewportSet = true;
+        v[0] = originX;
+        v[1] = originY;
+        v[2] = width;
+        v[3] = height;
+        v[4] = znear;
+        v[5] = zfar;
+        for (int i = 0; i < 6; i++) {
+            VIEWPORT.set(JAVA_DOUBLE, i * 8L, v[i]);
+        }
+        SET_VIEWPORT.send(handle(), VIEWPORT);
     }
 
     public void setVertexBytes(final MemorySegment bytes, final long length, final long index) {
+        if (index < TRACKED_BUFFERS) {
+            vertexBuffers[(int) index] = UNKNOWN;
+        }
         SET_VERTEX_BYTES.send(handle(), bytes, length, index);
     }
 
@@ -179,6 +306,23 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
 
     public void waitForFence(final MTLFence fence, final MTLRenderStages stages) {
         WAIT_FOR_FENCE.send(handle(), fence.handle(), stages.value);
+    }
+
+    private static boolean changed(final long[] shadow, final long index, final long address) {
+        if (index >= shadow.length) {
+            return true;
+        }
+        if (shadow[(int) index] == address) {
+            return false;
+        }
+        shadow[(int) index] = address;
+        return true;
+    }
+
+    private static long[] unknown(final int size) {
+        long[] values = new long[size];
+        java.util.Arrays.fill(values, UNKNOWN);
+        return values;
     }
 
     private static MemorySegment seg(final MTLBuffer buffer) {

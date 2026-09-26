@@ -1,6 +1,8 @@
 package com.metallum.render;
 
 import com.metallum.mtl.MTLBuffer;
+import com.metallum.mtl.MTLTexture;
+import com.metallum.objc.ObjC;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBuffer.Usage;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
@@ -16,6 +18,7 @@ import net.minecraft.util.Mth;
 import org.jspecify.annotations.NonNull;
 import org.lwjgl.system.MemoryUtil;
 
+import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.stream.IntStream;
@@ -206,6 +209,16 @@ final class MetalTransientMemory implements TransientMemory {
         @Override
         public void close() {
             closed = true;
+        }
+
+        @Override
+        MemorySegment texelView(final long pixelFormat, final long offset, final long length, final long texelCount) {
+            // Transient wrappers are never closed, so don't cache: release the view with this frame's resources.
+            MemorySegment view = MTLTexture.newBufferTextureView(nativeHandle(), pixelFormat, offset, texelCount, length);
+            if (!ObjC.isNil(view)) {
+                owner.encoder.queueForDestroy(() -> ObjC.release(view));
+            }
+            return view;
         }
 
         @Override

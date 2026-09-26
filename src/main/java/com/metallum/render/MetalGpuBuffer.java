@@ -4,6 +4,7 @@ import com.metallum.mtl.MTLBuffer;
 import com.metallum.mtl.MTLHazardTrackingMode;
 import com.metallum.mtl.MTLResourceOptions;
 import com.metallum.mtl.MTLStorageMode;
+import com.metallum.mtl.MTLTexture;
 import com.metallum.objc.ObjC;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
@@ -28,6 +29,11 @@ class MetalGpuBuffer extends GpuBuffer {
     @Nullable
     private ByteBuffer storage;
     private boolean closed;
+    // Single-entry cache: texel buffers are rebound every frame with the same range.
+    private MemorySegment texelView = MemorySegment.NULL;
+    private long texelViewFormat;
+    private long texelViewOffset;
+    private long texelViewLength;
 
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size) {
         super(usage, size);
@@ -114,7 +120,34 @@ class MetalGpuBuffer extends GpuBuffer {
         return this.storage.duplicate().order(this.storage.order());
     }
 
+    /**
+     * A texture view of {@code [offset, offset + length)} as {@code pixelFormat} texels, created once
+     * and reused until the range, format or backing storage changes. Returns NULL if Metal refuses it.
+     */
+    MemorySegment texelView(final long pixelFormat, final long offset, final long length, final long texelCount) {
+        if (!ObjC.isNil(this.texelView)
+                && this.texelViewFormat == pixelFormat
+                && this.texelViewOffset == offset
+                && this.texelViewLength == length) {
+            return this.texelView;
+        }
+        releaseTexelView();
+        this.texelView = MTLTexture.newBufferTextureView(nativeHandle(), pixelFormat, offset, texelCount, length);
+        this.texelViewFormat = pixelFormat;
+        this.texelViewOffset = offset;
+        this.texelViewLength = length;
+        return this.texelView;
+    }
+
+    private void releaseTexelView() {
+        if (!ObjC.isNil(this.texelView)) {
+            this.device.queueResourceRelease(this.texelView);
+            this.texelView = MemorySegment.NULL;
+        }
+    }
+
     void swapBacking(final MTLBuffer buffer, final ByteBuffer storage) {
+        releaseTexelView();
         this.nativeBuffer = buffer;
         this.storage = storage;
     }
@@ -131,6 +164,7 @@ class MetalGpuBuffer extends GpuBuffer {
         }
         this.closed = true;
         this.storage = null;
+        releaseTexelView();
         if (this.nativeBuffer != null) {
             MemorySegment handle = this.nativeBuffer.handle();
             this.nativeBuffer = null;
