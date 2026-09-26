@@ -58,6 +58,7 @@ METRICS = [
     ("summary.perFrame.uploadBytes", "upload bytes/frame", False),
     ("summary.perFrame.pipelineCompiles", "pipeline compiles/frame", False),
     ("summary.perFrame.buffersCreated", "MTLBuffers created/frame", False),
+    ("summary.perFrame.indirectDraws", "indirect draws/frame", False),
 ]
 
 
@@ -177,9 +178,11 @@ def compare_images(base_spec, cand_spec):
     if not base or not cand:
         print("\nscreenshots: not available for both sides")
         return
-    # Baseline-vs-baseline shows how deterministic the scene is; the candidate should be no further off.
-    noise = image_diff(base[0], base[1]) if len(base) > 1 else None
-    diff = image_diff(base[0], cand[0])
+    # Baseline-vs-baseline shows how deterministic the scene is (worst pair); the candidate (median over
+    # its runs) should be no further off.
+    noise = max((image_diff(base[0], other) for other in base[1:]), default=None)
+    diffs = sorted(image_diff(base[0], c) for c in cand)
+    diff = diffs[len(diffs) // 2]
     line = f"\nscreenshot diff vs baseline: {100 * diff[0]:.3f}% of pixels differ (max channel delta {diff[1]})"
     if noise is not None:
         line += f"; baseline run-to-run: {100 * noise[0]:.3f}% (max {noise[1]})"
