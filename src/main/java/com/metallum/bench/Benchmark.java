@@ -6,6 +6,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
 import net.minecraft.client.Screenshot;
 import net.minecraft.client.server.IntegratedServer;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.Difficulty;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.LevelSettings;
@@ -59,6 +60,8 @@ public final class Benchmark {
         long now = System.nanoTime();
         if (bootedAt < 0L) {
             bootedAt = now;
+            // Before the title screen can start music: no audio work during the benchmark.
+            mc.options.getSoundSourceOptionInstance(SoundSource.MASTER).set(0.0);
         }
         if ((phase == Phase.BOOT || phase == Phase.LOADING || phase == Phase.WARMUP) && now - bootedAt > TIMEOUT_NANOS) {
             abort(mc, "timed out in phase " + phase);
