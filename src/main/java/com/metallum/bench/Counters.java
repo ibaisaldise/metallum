@@ -18,6 +18,8 @@ public final class Counters {
     public static long pipelineCompiles;
     public static long buffersCreated;
     public static long indirectDraws;
+    /** Frames not presented because every drawable was still queued for the compositor (vsync off only). */
+    public static long presentsSkipped;
     /** GPU execution time of retired command buffers. Lags the CPU by up to MAX_SUBMITS_IN_FLIGHT frames. */
     public static long gpuNanos;
     public static long gpuSamples;
@@ -28,7 +30,8 @@ public final class Counters {
 
     static final String[] NAMES = {
             "drawCalls", "renderEncoders", "blitEncoders", "commandBuffers", "pipelineBinds",
-            "bufferBinds", "textureBinds", "samplerBinds", "texelViewsCreated", "uploadBytes", "pipelineCompiles", "buffersCreated", "indirectDraws"
+            "bufferBinds", "textureBinds", "samplerBinds", "texelViewsCreated", "uploadBytes", "pipelineCompiles", "buffersCreated", "indirectDraws",
+            "presentsSkipped"
     };
 
     private Counters() {
@@ -48,5 +51,6 @@ public final class Counters {
         out[10] = pipelineCompiles;
         out[11] = buffersCreated;
         out[12] = indirectDraws;
+        out[13] = presentsSkipped;
     }
 }

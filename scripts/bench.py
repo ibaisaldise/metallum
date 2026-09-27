@@ -62,6 +62,7 @@ METRICS = [
     ("summary.perFrame.pipelineCompiles", "pipeline compiles/frame", False),
     ("summary.perFrame.buffersCreated", "MTLBuffers created/frame", False),
     ("summary.perFrame.indirectDraws", "indirect draws/frame", False),
+    ("summary.perFrame.presentsSkipped", "presents skipped/frame", False),
 ]
 
 
