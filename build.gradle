@@ -72,8 +72,17 @@ java {
 	targetCompatibility = JavaVersion.VERSION_25
 }
 
+// Compile-time copies of other mods' interfaces that Metallum implements for compatibility.
+// The real ones come from those mods at runtime, so they must not ship in the jar.
+def compatStubs = "meteordevelopment/**"
+
+sourcesJar {
+	exclude compatStubs
+}
+
 jar {
 	inputs.property "projectName", project.name
+	exclude compatStubs
 
 	from("LICENSE") {
 		rename { "${it}_${project.name}"}

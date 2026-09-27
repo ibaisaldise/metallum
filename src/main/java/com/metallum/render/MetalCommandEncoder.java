@@ -303,6 +303,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         );
         currentRenderPass = renderPass;
         renderPass.pushDebugGroup(descriptor.label());
+        GlobalScissor.apply(renderPass);
         return renderPass;
     }
 

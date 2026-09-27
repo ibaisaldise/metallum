@@ -40,6 +40,9 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         if (mixinClassName.contains(".mixin.bench.")) {
             return Boolean.getBoolean("metallum.bench");
         }
+        if (mixinClassName.contains(".mixin.meteor.")) {
+            return FabricLoader.getInstance().isModLoaded("meteor-client");
+        }
         if (mixinClassName.contains(".mixin.sodium.")) {
             return FabricLoader.getInstance().isModLoaded("sodium");
         }
